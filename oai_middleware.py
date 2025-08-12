@@ -10,7 +10,8 @@ from config import (
     GENESYS_PATH,
     logger,
     LOG_FILE,
-    DEBUG
+    DEBUG,
+    GENESYS_API_KEY
 )
 
 from audio_hook_server import AudioHookServer
@@ -39,23 +40,31 @@ async def validate_request(path, request_headers):
         logger.error(f"[HTTP]   Normalized expected: {normalized_target}")
         return http.HTTPStatus.NOT_FOUND, [], b'Invalid path\n'
 
+    # --- Start of Security Update ---
+    # Check for the presence and value of the x-api-key
+    header_keys = {k.lower(): v for k, v in request_headers.items()}
+    incoming_api_key = header_keys.get('x-api-key')
+
+    if not incoming_api_key:
+        logger.error("[HTTP] Connection rejected - Missing 'x-api-key' header.")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Missing 'x-api-key' header\n"
+
+    if incoming_api_key != GENESYS_API_KEY:
+        logger.error("[HTTP] Connection rejected - Invalid API Key.")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API Key\n"
+
+    logger.info("[HTTP] API Key validation successful.")
+    # --- End of Security Update ---
+
+
     required_headers = [
         'audiohook-organization-id',
         'audiohook-correlation-id',
         'audiohook-session-id',
-        'x-api-key',
         'upgrade',
         'sec-websocket-version',
         'sec-websocket-key'
     ]
-
-    header_keys = {k.lower(): v for k, v in request_headers.items()}
-    logger.info("[HTTP] Normalized headers for validation:")
-    for k, v in header_keys.items():
-        if k in ['x-api-key', 'authorization']:
-            logger.info(f"[HTTP]   {k}: {'*' * 8}")
-        else:
-            logger.info(f"[HTTP]   {k}: {v}")
 
     missing_headers = []
     found_headers = []
@@ -66,10 +75,10 @@ async def validate_request(path, request_headers):
             found_headers.append(h)
 
     if missing_headers:
-        error_msg = f"Missing required headers: {', '.join(missing_headers)}"
+        error_msg = f"Missing required headers (excluding x-api-key): {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return http.HTTPStatus.UNAUTHORIZED, [], error_msg.encode()
+        return http.HTTPStatus.BAD_REQUEST, [], error_msg.encode()
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
@@ -197,6 +206,7 @@ Log File: {os.path.abspath(LOG_FILE)}
             handle_genesys_connection,
             host,
             port,
+            process_request=validate_request, # Use the updated validation function
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
