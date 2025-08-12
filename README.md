@@ -157,12 +157,14 @@ In your Genesys Cloud you will need an Audio Connector integration and a inbound
 <img width="903" height="542" alt="image" src="https://github.com/user-attachments/assets/105173df-d334-4f06-b5c8-da29bb1d273e" />
 
 Set the wss endpoint (according to the domain of your middleware):
+
 <img width="1548" height="479" alt="image" src="https://github.com/user-attachments/assets/1529d6e4-9aaf-4d0a-bc9f-e363cf78e64f" />
 
 Set the API Key:
 
 <img width="1182" height="646" alt="image" src="https://github.com/user-attachments/assets/70fb79a4-9d00-4060-9582-1b653f655dd5" />
 
+Make sure you save and activate the integration.
 
 ### Inbound call flow
 
