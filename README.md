@@ -1,15 +1,14 @@
 # Genesys & OpenAI Real-Time Voice Connector
 
-This project provides a real-time voice connector that bridges Genesys Cloud AudioHook with OpenAI's Real-Time API. It enables a voicebot to listen to a live audio stream from a phone call, transcribe it in real-time, and generate intelligent, human-like responses that can be played back to the caller.
+This project provides a real-time voice connector that bridges Genesys Cloud AudioHook with OpenAI's Real-Time API. It enables a voicebot to listen to a live audio stream from a phone call, handle it in real-time, and generate intelligent, human-like responses that can are played back to the caller.
 
-This application is designed to be deployed on cloud platforms like DigitalOcean, where networking and SSL are managed externally.
+This application is designed to be deployed on cloud platforms like DigitalOcean.
 
 ## Features
 
-- **Real-Time Transcription & Response**: Captures audio from Genesys AudioHook, sends it to OpenAI for live transcription, and receives synthesized voice responses.
+- **Real-Time Response**: Captures audio from Genesys AudioHook, sends it to OpenAI for live handling, and receives real time voice responses. No need for STT or TTS, it leverages a speech-to-speech LLM.
 - **Dynamic AI Configuration**: Customize the AI's behavior directly from Genesys Architect by passing in variables for the system prompt, AI model, voice, and more.
 - **Intelligent Conversation Management**: The AI can understand the context of the conversation and provide relevant, helpful responses. It includes built-in turn detection (VAD - Voice Activity Detection) to manage the flow of conversation naturally.
-- **Conversation Summarization**: At the end of a call, the application generates a structured summary of the conversation, including main topics, key decisions, and action items.
 - **Rate Limiting & Error Handling**: Includes robust rate limiting and exponential backoff to handle API limits gracefully and ensure stable operation.
 - **Cloud-Ready Deployment**: Stripped of local SSL and port management, making it easy to deploy on modern cloud platforms like DigitalOcean App Platform.
 
@@ -19,8 +18,8 @@ The application operates as a WebSocket server that listens for connections from
 
 1. **Connection**: A call in Genesys Cloud with an active AudioHook action initiates a WebSocket connection to this server.
 2. **Audio Streaming**: The server receives a real-time stream of the call audio (in PCMU/ULAW format).
-3. **AI Processing**: The audio is forwarded to the OpenAI Real-Time API. OpenAI transcribes the audio, processes it through the specified language model (e.g., gpt-4o-mini-realtime-preview), and generates a response.
-4. **Voice Synthesis**: OpenAI synthesizes the text response into audio using the chosen voice and streams it back.
+3. **AI Processing**: The audio is forwarded to the OpenAI Real-Time API. OpenAI gets the audio, processes it through the specified language model (e.g., gpt-4o-mini-realtime-preview), and generates a response.
+4. **Voice Synthesis**: OpenAI synthesizes the response directly into audio using the chosen voice and streams it back.
 5. **Playback**: The server sends the synthesized audio back to Genesys, which plays it to the caller.
 6. **Summarization & Disconnect**: When the call ends, the application requests a final summary from OpenAI and sends it back to Genesys before closing the connection.
 
