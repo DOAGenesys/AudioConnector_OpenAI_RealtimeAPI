@@ -124,7 +124,7 @@ Push your code to a Git repository (GitHub/GitLab). Include `requirements.txt` b
 
 1. Navigate to DigitalOcean Apps section
 2. Click **Create App** and select your repository
-3. Verify run command is set to: `python oai_middleware.py`
+3. Define you server specs (for testing purposes you can just select the 5$/month cheapest option)
 
 #### Step 3: Configure Environment Variables
 
@@ -140,15 +140,9 @@ Add the following environment variables in the app settings:
 
 **Important**: Mark sensitive variables as encrypted secrets.
 
-#### Step 4: Configure Networking
+#### Step 4: Deploy
 
-- Ensure HTTP port is set to 8080
-- DigitalOcean automatically handles SSL termination
-- Note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`)
-
-#### Step 5: Deploy
-
-Save configuration and deploy. DigitalOcean will provide a secure WSS endpoint for Genesys integration.
+- Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`)
 
 ## Genesys Cloud Setup
 
