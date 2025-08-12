@@ -153,13 +153,16 @@ Save configuration and deploy. DigitalOcean will provide a secure WSS endpoint f
 ### Audio Connector Integration
 
 1. Create new Audio Connector integration
-2. Configure WebSocket endpoint: `wss://your-app-domain.ondigitalocean.app`
+2. Configure WebSocket endpoint: `wss://your-app-domain.ondigitalocean.app/audiohook`
 3. Set API Key header with your `GENESYS_API_KEY` value
 4. Save and activate integration
 
 ### Architect Flow Configuration
 
-Create an inbound call flow with the Call Audio Connector action referencing your integration.
+Create an inbound call flow with the Call Audio Connector action referencing your integration. Example:
+
+<img width="1389" height="1076" alt="image" src="https://github.com/user-attachments/assets/7c57d40a-81f0-4afc-b5ee-ed12996a886f" />
+
 
 ## Session Variables
 
