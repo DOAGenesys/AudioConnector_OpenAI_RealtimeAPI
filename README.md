@@ -102,16 +102,6 @@ DEBUG=true
 
 See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated voice availability.
 
-## Local Development
-
-Start the development server:
-
-```bash
-python oai_middleware.py
-```
-
-The server will listen on `0.0.0.0:8080` for WebSocket connections.
-
 ## Deployment
 
 ### DigitalOcean App Platform
@@ -141,6 +131,11 @@ Add the following environment variables in the app settings:
 **Important**: Mark sensitive variables as encrypted secrets.
 
 #### Step 4: Deploy
+
+- Make sure the instance size, the environment variables, the region and the name are correctly set, and proceed ("Create App"):
+
+<img width="976" height="1159" alt="image" src="https://github.com/user-attachments/assets/7a87e31d-6766-4279-aee0-956e26dc23e4" />
+
 
 - Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`)
 
