@@ -136,6 +136,13 @@ Add the following environment variables in the app settings:
 
 <img width="976" height="1159" alt="image" src="https://github.com/user-attachments/assets/7a87e31d-6766-4279-aee0-956e26dc23e4" />
 
+#### Step 5: Run command
+
+- The Run command ("python oai_middleware.py") must be set in "Settings", otherwise the deployment will fail:
+
+<img width="898" height="1185" alt="image" src="https://github.com/user-attachments/assets/778872e3-315c-4995-af44-5f7284d95ad8" />
+
+
 
 - Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`)
 
