@@ -79,19 +79,27 @@ Now, edit the `.env` file with your specific settings:
 ```bash
 # .env
 
-# --- OpenAI API Configuration ---
-# Your secret OpenAI API key
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# This is the secret key your application will use to validate incoming connections from Genesys.
+# You must configure Genesys AudioHook to send this exact value in the 'x-api-key' header.
+GENESYS_API_KEY=<your_shared_secret_with_genesys>
 
-# The model to use for the real-time interaction.
+# --- OpenAI API Configuration ---
+OPENAI_API_KEY=<your_openai_api_key>
 OPENAI_MODEL=gpt-4o-mini-realtime-preview
 
-# The voice for the AI assistant. Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
+# Voice options for OpenAI:
+#   - alloy
+#   - ash
+#   - ballad
+#   - coral
+#   - echo
+#   - sage
+#   - shimmer
+#   - verse
 OPENAI_VOICE=echo
 
-# --- Debug Settings ---
-# Set to 'true' for verbose logging, 'false' for production.
-DEBUG=false
+# --- Debug settings ---
+DEBUG=true
 ```
 
 ### Usage
