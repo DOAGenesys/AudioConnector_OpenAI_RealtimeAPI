@@ -5,11 +5,10 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-env_path = Path('.') / '.env'
-if not env_path.exists():
-    raise FileNotFoundError("Please create a .env file with OPENAI_API_KEY and other optional settings")
-load_dotenv(env_path)
+# Load environment variables from .env file if it exists (for local development).
+# In a production environment like DigitalOcean, these variables will be loaded
+# from the platform's environment settings.
+load_dotenv()
 
 DEBUG = os.getenv('DEBUG', 'false').lower()
 
@@ -18,7 +17,7 @@ DEBUG = os.getenv('DEBUG', 'false').lower()
 # This is used to authorize incoming connections.
 GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
 if not GENESYS_API_KEY:
-    raise ValueError("GENESYS_API_KEY not found in .env file. This is required for security.")
+    raise ValueError("GENESYS_API_KEY not found in environment variables. This is required for security.")
 
 
 # Audio buffering settings
@@ -31,7 +30,7 @@ GENESYS_PATH = "/audiohook"
 # OpenAI Realtime API settings
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in .env file")
+    raise ValueError("OPENAI_API_KEY not found in environment variables.")
 
 OPENAI_MODEL = os.getenv('OPENAI_MODEL')
 if not OPENAI_MODEL:
