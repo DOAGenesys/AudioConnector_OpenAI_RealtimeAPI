@@ -197,4 +197,4 @@ These variables are returned when the session ends:
 | `TOTAL_OUTPUT_TEXT_TOKENS` | Text tokens received from OpenAI |
 | `TOTAL_OUTPUT_AUDIO_TOKENS` | Audio tokens received from OpenAI |
 
-Note: there some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
+Note: there are some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
