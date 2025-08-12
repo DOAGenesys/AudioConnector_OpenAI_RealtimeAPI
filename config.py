@@ -13,6 +13,14 @@ load_dotenv(env_path)
 
 DEBUG = os.getenv('DEBUG', 'false').lower()
 
+# --- Genesys Authorization ---
+# The secret API key that Genesys will send in the 'x-api-key' header.
+# This is used to authorize incoming connections.
+GENESYS_API_KEY = os.getenv('GENESYS_API_KEY')
+if not GENESYS_API_KEY:
+    raise ValueError("GENESYS_API_KEY not found in .env file. This is required for security.")
+
+
 # Audio buffering settings
 MAX_AUDIO_BUFFER_SIZE = 50
 AUDIO_FRAME_SEND_INTERVAL = 0.15
