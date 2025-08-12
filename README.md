@@ -89,7 +89,7 @@ OPENAI_VOICE=echo
 DEBUG=true
 ```
 
-### Available Voice Options
+### Available OpenAI Voice Options:
 
 - `alloy`
 - `ash`
@@ -99,6 +99,8 @@ DEBUG=true
 - `sage`
 - `shimmer`
 - `verse`
+
+See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated voice availability.
 
 ## Local Development
 
