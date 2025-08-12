@@ -150,11 +150,23 @@ Once deployed, DigitalOcean will provide you with a public URL (e.g., `https://y
 
 ## Genesys Cloud Configuration
 
-In your Genesys Cloud Architect flow, add an AudioHook action. In the configuration:
+In your Genesys Cloud you will need an Audio Connector integration and a inbound call Architect flow.
 
-- **URL**: Enter the secure WebSocket URL provided by DigitalOcean (`wss://your-app-name-xxxxx.ondigitalocean.app/audiohook`).
-- **API Key**: Add your `x-api-key` if you have implemented one for an extra layer of security.
-- **Input Variables**: You can pass variables to the connector to dynamically control the AI's behavior. For example:
-  - `OPENAI_SYSTEM_PROMPT`: A string containing the system prompt for the AI.
-  - `OPENAI_VOICE`: The voice to use for this specific interaction.
-  - `COMPANY_NAME`: The company name to be used in prompts.
+### Audio Connector integration
+
+<img width="903" height="542" alt="image" src="https://github.com/user-attachments/assets/105173df-d334-4f06-b5c8-da29bb1d273e" />
+
+Set the wss endpoint (according to the domain of your middleware):
+<img width="1548" height="479" alt="image" src="https://github.com/user-attachments/assets/1529d6e4-9aaf-4d0a-bc9f-e363cf78e64f" />
+
+Set the API Key:
+
+<img width="1182" height="646" alt="image" src="https://github.com/user-attachments/assets/70fb79a4-9d00-4060-9582-1b653f655dd5" />
+
+
+### Inbound call flow
+
+Example inbound call flow invoking OpenAI Audio connector integration:
+
+<img width="1388" height="1065" alt="image" src="https://github.com/user-attachments/assets/b07d078c-8149-46bd-9d5c-879fe75c252c" />
+
