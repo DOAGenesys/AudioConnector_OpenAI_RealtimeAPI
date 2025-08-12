@@ -144,7 +144,10 @@ Add the following environment variables in the app settings:
 
 
 
-- Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`)
+- Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`):
+
+  <img width="1438" height="320" alt="image" src="https://github.com/user-attachments/assets/d2a5064c-961a-4668-9cd2-c52e44864afc" />
+
 
 ## Genesys Cloud Setup
 
