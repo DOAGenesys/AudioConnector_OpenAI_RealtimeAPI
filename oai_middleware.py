@@ -187,6 +187,23 @@ async def handle_genesys_connection(websocket):
     finally:
         logger.info(f"[WS-{connection_id}] Connection handler finished\n{'='*50}")
 
+def select_subprotocol(request, available_subprotocols):
+    """
+    Selects a subprotocol to use for the WebSocket connection.
+    """
+    requested = request.headers.get("Sec-WebSocket-Protocol")
+    if requested:
+        logger.info(f"[HTTP] Client requested subprotocols: {requested}")
+        # Split and strip whitespace
+        protocols = [p.strip() for p in requested.split(',')]
+        for p in protocols:
+            if p in available_subprotocols:
+                logger.info(f"[HTTP] Selected subprotocol: {p}")
+                return p
+    logger.info("[HTTP] No matching subprotocol found or none requested.")
+    return None
+
+
 async def main():
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8080))
@@ -215,7 +232,8 @@ Log File: {os.path.abspath(LOG_FILE)}
             handle_genesys_connection,
             host,
             port,
-            process_request=validate_request, # Use the updated validation function
+            process_request=validate_request,
+            select_subprotocol=select_subprotocol,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
