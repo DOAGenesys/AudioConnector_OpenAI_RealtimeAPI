@@ -206,7 +206,7 @@ Log File: {os.path.abspath(LOG_FILE)}
             handle_genesys_connection,
             host,
             port,
-            process_request=validate_request, # Use the updated validation function
+            process_request=validate_request,
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
@@ -220,6 +220,8 @@ Log File: {os.path.abspath(LOG_FILE)}
                 await asyncio.Future()  # run forever
             except asyncio.CancelledError:
                 logger.info("Server shutdown initiated")
+    except websockets.exceptions.InvalidMessage:
+        logger.warning("Invalid WebSocket message received. This might be a health check.")
     except Exception as e:
         logger.error(f"Failed to start server: {e}", exc_info=True)
         raise
