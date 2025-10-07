@@ -21,6 +21,7 @@ from datetime import datetime
 async def validate_request(path, request_headers):
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
     logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
+    # Correctly access headers from the request object
     logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
 
     logger.info("[HTTP] Full headers received:")
