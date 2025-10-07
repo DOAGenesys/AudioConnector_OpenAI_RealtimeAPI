@@ -19,9 +19,18 @@ from utils import format_json
 from datetime import datetime
 
 async def validate_request(path, request_headers):
+    """
+    This function is updated to handle both Genesys WebSocket upgrade requests
+    and simple HTTP health checks from the deployment platform.
+    """
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
+    logger.info(f"[HTTP] Target path: {path}")
     logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
+
+    # Handle health checks from the deployment platform
+    if path == "/":
+        logger.info("[HTTP] Health check request received. Responding with 200 OK.")
+        return http.HTTPStatus.OK, [], b"OK\n"
 
     logger.info("[HTTP] Full headers received:")
     for name, value in request_headers.items():
