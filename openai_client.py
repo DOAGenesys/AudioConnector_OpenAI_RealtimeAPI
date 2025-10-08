@@ -265,7 +265,7 @@ class OpenAIRealtimeClient:
                     tool_names = [t.get("name") for t in session_update.get("session", {}).get("tools", [])]
                 except Exception:
                     tool_names = []
-                self.logger.info(f"Configured OpenAI tools: {tool_names}; tool_choice=auto; voice={self.voice}")
+                self.logger.info(f"[FunctionCall] Configured OpenAI tools: {tool_names}; tool_choice=auto; voice={self.voice}")
 
                 updated_ok = False
                 while True:
@@ -282,7 +282,7 @@ class OpenAIRealtimeClient:
                             raise RuntimeError("Max rate limit retries exceeded during session update")
 
                     if ev.get("type") == "session.updated":
-                        self.logger.info("OpenAI session updated with tools and audio settings")
+                        self.logger.info("[FunctionCall] OpenAI session updated with tools and audio settings")
                         updated_ok = True
                         break
 
@@ -402,7 +402,7 @@ class OpenAIRealtimeClient:
                                             safe_args_str = json.dumps(args)[:512]
                                         except Exception:
                                             safe_args_str = str(args)[:512]
-                                        self.logger.info(f"Detected function/tool call: name={name}, call_id={call_id}, args={safe_args_str}")
+                                        self.logger.info(f"[FunctionCall] Detected function/tool call: name={name}, call_id={call_id}, args={safe_args_str}")
                                         await self._handle_function_call(name, call_id, args)
 
                                 if self._await_disconnect_on_done and self._disconnect_context:
@@ -441,7 +441,7 @@ class OpenAIRealtimeClient:
 
     async def _handle_function_call(self, name: str, call_id: str, args: dict):
         try:
-            self.logger.info(f"Handling function call: name={name}, call_id={call_id}")
+            self.logger.info(f"[FunctionCall] Handling function call: name={name}, call_id={call_id}")
             output_payload = {}
             action = None
             info = None
@@ -473,7 +473,7 @@ class OpenAIRealtimeClient:
                 }
             }
             await self._safe_send(json.dumps(event1))
-            self.logger.info(f"Sent function_call_output for call_id={call_id} payload={json.dumps(output_payload)[:512]}")
+            self.logger.info(f"[FunctionCall] Sent function_call_output for call_id={call_id} payload={json.dumps(output_payload)[:512]}")
 
             # Ask model to produce a short, final audio message
             event2 = {
@@ -487,9 +487,9 @@ class OpenAIRealtimeClient:
             }
             await self._safe_send(json.dumps(event2))
             if self._disconnect_context:
-                self.logger.info(f"Scheduled Genesys disconnect after farewell: action={self._disconnect_context.get('action')}, reason={self._disconnect_context.get('reason')}, info={self._disconnect_context.get('info')}")
+                self.logger.info(f"[FunctionCall] Scheduled Genesys disconnect after farewell: action={self._disconnect_context.get('action')}, reason={self._disconnect_context.get('reason')}, info={self._disconnect_context.get('info')}")
         except Exception as e:
-            self.logger.error(f"Error handling function call {name}: {e}")
+            self.logger.error(f"[FunctionCall] Error handling function call {name}: {e}")
 
     async def close(self):
         duration = time.time() - self.start_time
