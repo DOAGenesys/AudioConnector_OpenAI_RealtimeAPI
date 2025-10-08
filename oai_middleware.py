@@ -18,30 +18,20 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(path, request_headers):
+async def validate_request(connection, request):
     """
-    This function is updated to correctly handle the arguments passed by the
-    websockets library, including the case where 'path' is a connection
-    object and 'request_headers' is a request object.
+    This function is updated to correctly handle the connection and request
+    objects passed by the websockets library.
     """
-    # The websockets library might pass a connection object as the first argument
-    if hasattr(path, 'path'):
-        actual_path = path.path
-    else:
-        actual_path = path
-
-    # The websockets library might pass a request object as the second argument
-    if hasattr(request_headers, 'headers'):
-        headers = request_headers.headers
-    else:
-        headers = request_headers
+    path = connection.path
+    headers = request.headers
 
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {actual_path}")
+    logger.info(f"[HTTP] Target path: {path}")
     logger.info(f"[HTTP] Remote address: {headers.get('Host', 'unknown')}")
 
     # Handle health checks from the deployment platform
-    if actual_path == "/":
+    if path == "/":
         logger.info("[HTTP] Health check request received. Responding with 200 OK.")
         return http.HTTPStatus.OK, [], b"OK\n"
 
@@ -52,7 +42,7 @@ async def validate_request(path, request_headers):
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    normalized_path = actual_path.rstrip('/')
+    normalized_path = path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
 
     if normalized_path != normalized_target:
