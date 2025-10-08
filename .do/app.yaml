@@ -1,0 +1,44 @@
+name: audio-connector-oai
+region: fra1
+
+services:
+  - name: audioconnector-openai-realtimeap
+    github:
+      repo: REPLACE_WITH_YOUR_GITHUB_USERNAME/REPLACE_WITH_YOUR_REPO_NAME
+      branch: main
+      deploy_on_push: true
+    
+    run_command: python oai_middleware.py
+    
+    environment_slug: python
+    
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    
+    http_port: 8080
+    
+    health_check:
+      http_path: /
+      port: 8080
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 1
+      success_threshold: 1
+      failure_threshold: 9
+    
+    envs:
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: DEBUG
+        value: "true"
+        scope: RUN_AND_BUILD_TIME
+        type: GENERAL
+      - key: OPENAI_MODEL
+        value: "gpt-4o-mini-realtime-preview"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: GENESYS_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+
