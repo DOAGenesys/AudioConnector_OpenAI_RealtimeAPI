@@ -152,8 +152,7 @@ class OpenAIRealtimeClient:
         self.max_output_tokens = max_output_tokens if max_output_tokens else DEFAULT_MAX_OUTPUT_TOKENS
 
         ws_headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "OpenAI-Beta": "realtime=v1"
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
         }
 
         while True:
@@ -164,7 +163,7 @@ class OpenAIRealtimeClient:
                 self.ws = await asyncio.wait_for(
                     ws_connect(
                         OPENAI_REALTIME_URL,
-                        additional_headers=ws_headers,
+                        extra_headers=ws_headers,
                         max_size=2**23,
                         compression=None,
                         max_queue=32
@@ -206,20 +205,33 @@ class OpenAIRealtimeClient:
                 session_update = {
                     "type": "session.update",
                     "session": {
-                        "modalities": ["audio", "text"],
+                        "type": "realtime",
+                        "model": self.model,
                         "instructions": self.final_instructions,
-                        "voice": self.voice,
-                        "input_audio_format": "g711_ulaw",
-                        "output_audio_format": "g711_ulaw",
+                        "output_modalities": ["audio", "text"],
+                        "audio": {
+                            "input": {
+                                "format": {
+                                    "type": "audio/g711_ulaw",
+                                    "rate": 8000
+                                },
+                                "turn_detection": {
+                                    "type": "semantic_vad",
+                                    "threshold": 0.5,
+                                    "prefix_padding_ms": 300,
+                                    "silence_duration_ms": 500,
+                                    "create_response": True
+                                }
+                            },
+                            "output": {
+                                "format": {
+                                    "type": "audio/g711_ulaw"
+                                },
+                                "voice": self.voice
+                            }
+                        },
                         "temperature": self.temperature,
-                        "max_response_output_tokens": self.max_output_tokens,
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 500,
-                            "create_response": True
-                        }
+                        "max_output_tokens": self.max_output_tokens
                     }
                 }
 
