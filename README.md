@@ -11,6 +11,7 @@ This application serves as a WebSocket middleware that captures audio from Genes
 - **Real-Time Speech Processing**: Direct speech-to-speech communication using OpenAI's Real-Time API without traditional STT/TTS pipeline
 - **Dynamic AI Configuration**: Customize AI behavior through Genesys Architect variables (system prompt, model, voice, temperature)
 - **Intelligent Conversation Management**: Context-aware responses with built-in Voice Activity Detection (VAD) for natural conversation flow
+- **Autonomous Call Termination**: AI can autonomously end calls when users indicate they're done or request human escalation using OpenAI function calling
 - **Robust Error Handling**: Rate limiting and exponential backoff for stable API interaction
 - **Cloud-Ready Architecture**: Optimized for modern cloud platforms with automated SSL and scaling support
 
@@ -18,10 +19,57 @@ This application serves as a WebSocket middleware that captures audio from Genes
 
 1. **Connection Establishment**: Genesys Cloud AudioHook initiates WebSocket connection to the server
 2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format
-3. **AI Processing**: Audio forwarded to OpenAI Real-Time API using specified model (e.g., gpt-4o-mini-realtime-preview)
+3. **AI Processing**: Audio forwarded to OpenAI Real-Time API using specified model (e.g., gpt-realtime-mini)
 4. **Response Generation**: OpenAI processes audio and generates synthesized voice response
-5. **Audio Playback**: Synthesized audio streams back through Genesys to caller
-6. **Session Termination**: Final conversation summary generated and sent to Genesys before connection closure
+5. **Autonomous Call Management**: AI uses function calling to autonomously end calls when users indicate completion or request human escalation
+6. **Audio Playback**: Synthesized audio streams back through Genesys to caller
+7. **Session Termination**: Final conversation summary generated and sent to Genesys before connection closure
+
+## Function Calling for Autonomous Call Management
+
+The connector leverages OpenAI's function calling capability to enable the AI to autonomously manage call lifecycle based on user intent. This allows for more natural conversation flow and reduces the need for manual call termination logic.
+
+### Available Functions
+
+The AI can call two functions during conversations:
+
+#### `end_call`
+Triggers when the user indicates their request is complete or they're finished with the conversation.
+
+**Example phrases that trigger `end_call`:**
+- "Ok, I'm done for today, thank you."
+- "That is everything, bye"
+- "I'm all set, thanks"
+
+**Function parameters:**
+- `reason` (string): Short reason for ending the call
+- `note` (string, optional): Additional context or notes
+
+#### `handoff_to_human`
+Triggers when the user requests to speak with a human agent or indicates they need human assistance.
+
+**Example phrases that trigger `handoff_to_human`:**
+- "I want to speak to a person"
+- "Put me through to a human agent"
+- "Can I talk to someone?"
+
+**Function parameters:**
+- `reason` (string): Why the caller wants a human
+- `department` (string, optional): Target department or queue
+
+### How It Works
+
+1. **Function Detection**: OpenAI's model analyzes user input and determines if it should call a function
+2. **Function Execution**: The server receives the function call arguments and executes the appropriate action
+3. **Graceful Termination**: The AI provides a brief farewell message, then the server initiates Genesys call termination
+4. **Architect Integration**: The disconnect reason is passed back to Genesys Architect for flow branching
+
+### Integration Benefits
+
+- **Natural Conversations**: Users can end calls conversationally without specific keywords
+- **Intelligent Escalation**: Automatic detection of human agent requests
+- **Architect Flow Control**: Different disconnect reasons allow for conditional branching in Architect flows
+- **Reduced Manual Logic**: Less need for complex timeout or keyword-based termination rules
 
 ## Prerequisites
 
@@ -81,7 +129,7 @@ GENESYS_API_KEY=<your_shared_secret_with_genesys>
 
 # OpenAI Configuration
 OPENAI_API_KEY=<your_openai_api_key>
-OPENAI_MODEL=gpt-realtime
+OPENAI_MODEL=gpt-realtime-mini
 OPENAI_VOICE=sage
 
 # Debug Settings
@@ -135,17 +183,11 @@ Add the following environment variables in the app settings:
 
 <img width="976" height="1159" alt="image" src="https://github.com/user-attachments/assets/7a87e31d-6766-4279-aee0-956e26dc23e4" />
 
-#### Step 5: (After successful deployment) Run command
+#### Step 5: Run command
 
 - The Run command ("python oai_middleware.py") must be set in "Settings", otherwise the deployment will fail:
 
 <img width="898" height="1185" alt="image" src="https://github.com/user-attachments/assets/778872e3-315c-4995-af44-5f7284d95ad8" />
-
-#### Step 6: (After successful deployment) Health Checks config
-
-- Make sure the "Health Checks" config is like this:
-
-<img width="812" height="1109" alt="image" src="https://github.com/user-attachments/assets/39fdb977-c9fa-4814-be0a-429e8fa7161e" />
 
 
 
@@ -182,7 +224,7 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 |---------------|-------------|---------------|
 | `OPENAI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
 | `OPENAI_VOICE` | Voice selection (see options above) | "sage" |
-| `OPENAI_MODEL` | OpenAI model to use | "gpt-4o-mini-realtime-preview" |
+| `OPENAI_MODEL` | OpenAI model to use | "gpt-realtime-mini" |
 | `OPENAI_TEMPERATURE` | Deprecated; ignored by GA Realtime API | — |
 | `OPENAI_MAX_OUTPUT_TOKENS` | Deprecated; ignored by GA Realtime API | — |
 | `LANGUAGE` | Response language override | Not set |
