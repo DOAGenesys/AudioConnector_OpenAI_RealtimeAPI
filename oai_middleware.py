@@ -18,17 +18,20 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(path, headers):
+async def validate_request(path, request_headers):
     """
-    This function is now corrected to properly handle the path and headers
-    arguments as they are passed by the websockets library.
+    This function is now definitively corrected to properly handle the path and
+    headers arguments as they are passed by the websockets library.
     """
+    actual_path = path
+    headers = request_headers
+
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {path}")
+    logger.info(f"[HTTP] Target path: {actual_path}")
     logger.info(f"[HTTP] Remote address: {headers.get('Host', 'unknown')}")
 
     # Handle health checks from the deployment platform
-    if path == "/":
+    if actual_path == "/":
         logger.info("[HTTP] Health check request received. Responding with 200 OK.")
         return http.HTTPStatus.OK, [], b"OK\n"
 
@@ -39,7 +42,7 @@ async def validate_request(path, headers):
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    normalized_path = path.rstrip('/')
+    normalized_path = actual_path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
 
     if normalized_path != normalized_target:
