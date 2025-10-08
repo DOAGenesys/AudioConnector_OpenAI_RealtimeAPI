@@ -21,11 +21,31 @@ from datetime import datetime
 async def validate_request(path, request_headers):
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
     logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
-    logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
+
+    def build_header_map(source):
+        # websockets may pass either a Headers-like mapping or a Request object
+        headers_obj = getattr(source, 'headers', source)
+        pairs = None
+        raw_items = getattr(headers_obj, 'raw_items', None)
+        if callable(raw_items):
+            pairs = list(raw_items())
+        else:
+            items_fn = getattr(headers_obj, 'items', None)
+            if callable(items_fn):
+                pairs = list(items_fn())
+        if pairs is None:
+            try:
+                pairs = list(headers_obj)
+            except Exception:
+                pairs = []
+        return {str(k).lower(): str(v) for k, v in pairs}
+
+    header_keys = build_header_map(request_headers)
+    logger.info(f"[HTTP] Remote address: {header_keys.get('host', 'unknown')}")
 
     logger.info("[HTTP] Full headers received:")
-    for name, value in request_headers.items():
-        if name.lower() in ['x-api-key', 'authorization']:
+    for name, value in header_keys.items():
+        if name in ['x-api-key', 'authorization']:
             logger.info(f"[HTTP]   {name}: {'*' * 8}")
         else:
             logger.info(f"[HTTP]   {name}: {value}")
@@ -33,7 +53,6 @@ async def validate_request(path, request_headers):
     normalized_path = path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
     
-    header_keys = {k.lower(): v for k, v in request_headers.items()}
     upgrade_header = header_keys.get('upgrade', '').lower()
     
     if normalized_path == '/' or normalized_path == '':
