@@ -55,13 +55,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Create Requirements File
+### 3. Requirements
 
-Create `requirements.txt` with the following dependencies:
+The project pins `websockets` to the 12.x series to ensure compatibility with the server and OpenAI GA WebSocket interface. Install from the provided file:
 
-```txt
-websockets
-python-dotenv
+```bash
+pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -82,8 +81,8 @@ GENESYS_API_KEY=<your_shared_secret_with_genesys>
 
 # OpenAI Configuration
 OPENAI_API_KEY=<your_openai_api_key>
-OPENAI_MODEL=gpt-realtime-mini
-OPENAI_VOICE=echo
+OPENAI_MODEL=gpt-realtime
+OPENAI_VOICE=sage
 
 # Debug Settings
 DEBUG=true
@@ -178,8 +177,8 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `OPENAI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
 | `OPENAI_VOICE` | Voice selection (see options above) | "sage" |
 | `OPENAI_MODEL` | OpenAI model to use | "gpt-4o-mini-realtime-preview" |
-| `OPENAI_TEMPERATURE` | Response randomness (0.6-1.2) | 0.8 |
-| `OPENAI_MAX_OUTPUT_TOKENS` | Max response tokens (integer or "inf") | "inf" |
+| `OPENAI_TEMPERATURE` | Deprecated; ignored by GA Realtime API | — |
+| `OPENAI_MAX_OUTPUT_TOKENS` | Deprecated; ignored by GA Realtime API | — |
 | `LANGUAGE` | Response language override | Not set |
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
