@@ -340,6 +340,9 @@ class AudioHookServer:
             self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
             self.openai_client.language = language
             self.openai_client.customer_data = customer_data
+            # Wire callbacks for function-calling driven disconnects
+            self.openai_client.on_end_call_request = self._on_end_call_request
+            self.openai_client.on_handoff_request = self._on_handoff_request
             await self.openai_client.connect(
                 instructions=instructions,
                 voice=voice,
@@ -359,6 +362,14 @@ class AudioHookServer:
 
         await self.start_audio_processing()
         await self.openai_client.start_receiving(on_audio_callback)
+
+    async def _on_end_call_request(self, reason: str, info: str):
+        # Ensure we request a graceful Genesys disconnect
+        await self.disconnect_session(reason=reason or "completed", info=info or "")
+
+    async def _on_handoff_request(self, reason: str, info: str):
+        # Use a distinct reason for Architect branching, e.g., "transfer"
+        await self.disconnect_session(reason=reason or "transfer", info=info or "handoff_to_human")
 
     async def handle_speech_started(self):
         event_msg = {
