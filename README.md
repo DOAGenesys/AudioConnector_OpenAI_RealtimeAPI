@@ -27,6 +27,7 @@ This application serves as a WebSocket middleware that captures audio from Genes
 
 ## Function Calling for Autonomous Call Management
 
+[THIS FEATURE HAS TO BE POLISHED AND TESTED, BY NOW THE OPENAI AGENT FAILS TO AUTONOMOUSLY DISCONNECT THE CALL]
 The connector leverages OpenAI's function calling capability to enable the AI to autonomously manage call lifecycle based on user intent. This allows for more natural conversation flow and reduces the need for manual call termination logic.
 
 ### Available Functions
