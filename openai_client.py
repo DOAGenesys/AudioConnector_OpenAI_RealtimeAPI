@@ -368,6 +368,9 @@ class OpenAIRealtimeClient:
                         elif ev_type == "input_audio_buffer.speech_started":
                             if self.on_speech_started_callback:
                                 await self.on_speech_started_callback()
+                        elif ev_type == "input_audio_buffer.speech_stopped":
+                            # End of user turn detected by OpenAI VAD → commit and request response
+                            await self._commit_and_request_response()
                         elif ev_type == "response.done":
                             self.last_response = msg_dict.get("response", {})
                             try:
@@ -420,6 +423,11 @@ class OpenAIRealtimeClient:
                                                 await self.on_end_call_request("transfer", ctx.get("info", "handoff_to_human"))
                                     except Exception as e:
                                         self.logger.error(f"Error invoking disconnect callback: {e}")
+                                    # Clear input buffer after a completed response/turn
+                                    try:
+                                        await self._safe_send(json.dumps({"type": "input_audio_buffer.clear"}))
+                                    except Exception as e:
+                                        self.logger.error(f"Error clearing input buffer: {e}")
                             except Exception:
                                 pass
                         elif ev_type == "response.function_call_arguments.delta":
@@ -438,6 +446,15 @@ class OpenAIRealtimeClient:
                 self.running = False
 
         self.read_task = asyncio.create_task(_read_loop())
+
+    async def _commit_and_request_response(self):
+        try:
+            # Finalize current input buffer
+            await self._safe_send(json.dumps({"type": "input_audio_buffer.commit"}))
+            # Ask model to respond using committed audio
+            await self._safe_send(json.dumps({"type": "response.create"}))
+        except Exception as e:
+            self.logger.error(f"Error committing input buffer and requesting response: {e}")
 
     async def _handle_function_call(self, name: str, call_id: str, args: dict):
         try:
