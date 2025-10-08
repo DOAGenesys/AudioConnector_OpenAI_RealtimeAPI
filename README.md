@@ -135,17 +135,18 @@ Add the following environment variables in the app settings:
 
 <img width="976" height="1159" alt="image" src="https://github.com/user-attachments/assets/7a87e31d-6766-4279-aee0-956e26dc23e4" />
 
-#### Step 5: Run command
+#### Step 5: (After successful deployment) Run command
 
 - The Run command ("python oai_middleware.py") must be set in "Settings", otherwise the deployment will fail:
 
 <img width="898" height="1185" alt="image" src="https://github.com/user-attachments/assets/778872e3-315c-4995-af44-5f7284d95ad8" />
 
-#### Step 6: Health config
+#### Step 6: (After successful deployment) Health Checks config
 
 - Make sure the "Health Checks" config is like this:
 
-<img width="841" height="1104" alt="image" src="https://github.com/user-attachments/assets/c7fce6c0-03ce-4bb3-8221-3d30a9e3951e" />
+<img width="812" height="1109" alt="image" src="https://github.com/user-attachments/assets/39fdb977-c9fa-4814-be0a-429e8fa7161e" />
+
 
 
 - Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`):
