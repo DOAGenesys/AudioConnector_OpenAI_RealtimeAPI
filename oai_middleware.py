@@ -20,26 +20,39 @@ from datetime import datetime
 
 async def validate_request(path, request_headers):
     """
-    This function is updated to handle both Genesys WebSocket upgrade requests
-    and simple HTTP health checks from the deployment platform.
+    This function is updated to correctly handle the arguments passed by the
+    websockets library, including the case where 'path' is a connection
+    object and 'request_headers' is a request object.
     """
+    # The websockets library might pass a connection object as the first argument
+    if hasattr(path, 'path'):
+        actual_path = path.path
+    else:
+        actual_path = path
+
+    # The websockets library might pass a request object as the second argument
+    if hasattr(request_headers, 'headers'):
+        headers = request_headers.headers
+    else:
+        headers = request_headers
+
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {path}")
-    logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
+    logger.info(f"[HTTP] Target path: {actual_path}")
+    logger.info(f"[HTTP] Remote address: {headers.get('Host', 'unknown')}")
 
     # Handle health checks from the deployment platform
-    if path == "/":
+    if actual_path == "/":
         logger.info("[HTTP] Health check request received. Responding with 200 OK.")
         return http.HTTPStatus.OK, [], b"OK\n"
 
     logger.info("[HTTP] Full headers received:")
-    for name, value in request_headers.items():
+    for name, value in headers.items():
         if name.lower() in ['x-api-key', 'authorization']:
             logger.info(f"[HTTP]   {name}: {'*' * 8}")
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    normalized_path = path.rstrip('/')
+    normalized_path = actual_path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
 
     if normalized_path != normalized_target:
@@ -51,7 +64,7 @@ async def validate_request(path, request_headers):
 
     # --- Start of Security Update ---
     # Check for the presence and value of the x-api-key
-    header_keys = {k.lower(): v for k, v in request_headers.items()}
+    header_keys = {k.lower(): v for k, v in headers.items()}
     incoming_api_key = header_keys.get('x-api-key')
 
     if not incoming_api_key:
