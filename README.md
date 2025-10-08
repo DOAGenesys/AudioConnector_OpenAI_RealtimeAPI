@@ -25,54 +25,6 @@ This application serves as a WebSocket middleware that captures audio from Genes
 6. **Audio Playback**: Synthesized audio streams back through Genesys to caller
 7. **Session Termination**: Final conversation summary generated and sent to Genesys before connection closure
 
-## Function Calling for Autonomous Call Management
-
-[THIS FEATURE HAS TO BE POLISHED AND TESTED, BY NOW THE OPENAI AGENT FAILS TO AUTONOMOUSLY DISCONNECT THE CALL]
-
-The connector leverages OpenAI's function calling capability to enable the AI to autonomously manage call lifecycle based on user intent. This allows for more natural conversation flow and reduces the need for manual call termination logic.
-
-### Available Functions
-
-The AI can call two functions during conversations:
-
-#### `end_call`
-Triggers when the user indicates their request is complete or they're finished with the conversation.
-
-**Example phrases that trigger `end_call`:**
-- "Ok, I'm done for today, thank you."
-- "That is everything, bye"
-- "I'm all set, thanks"
-
-**Function parameters:**
-- `reason` (string): Short reason for ending the call
-- `note` (string, optional): Additional context or notes
-
-#### `handoff_to_human`
-Triggers when the user requests to speak with a human agent or indicates they need human assistance.
-
-**Example phrases that trigger `handoff_to_human`:**
-- "I want to speak to a person"
-- "Put me through to a human agent"
-- "Can I talk to someone?"
-
-**Function parameters:**
-- `reason` (string): Why the caller wants a human
-- `department` (string, optional): Target department or queue
-
-### How It Works
-
-1. **Function Detection**: OpenAI's model analyzes user input and determines if it should call a function
-2. **Function Execution**: The server receives the function call arguments and executes the appropriate action
-3. **Graceful Termination**: The AI provides a brief farewell message, then the server initiates Genesys call termination
-4. **Architect Integration**: The disconnect reason is passed back to Genesys Architect for flow branching
-
-### Integration Benefits
-
-- **Natural Conversations**: Users can end calls conversationally without specific keywords
-- **Intelligent Escalation**: Automatic detection of human agent requests
-- **Architect Flow Control**: Different disconnect reasons allow for conditional branching in Architect flows
-- **Reduced Manual Logic**: Less need for complex timeout or keyword-based termination rules
-
 ## Prerequisites
 
 - Python 3.9 or higher
@@ -250,3 +202,51 @@ These variables are returned when the session ends:
 | `TOTAL_OUTPUT_AUDIO_TOKENS` | Audio tokens received from OpenAI |
 
 Note: there are some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
+
+## Function Calling for Autonomous Call Management
+
+[THIS FEATURE HAS TO BE POLISHED AND TESTED, BY NOW THE OPENAI AGENT FAILS TO AUTONOMOUSLY DISCONNECT THE CALL]
+
+The connector leverages OpenAI's function calling capability to enable the AI to autonomously manage call lifecycle based on user intent. This allows for more natural conversation flow and reduces the need for manual call termination logic.
+
+### Available Functions
+
+The AI can call two functions during conversations:
+
+#### `end_call`
+Triggers when the user indicates their request is complete or they're finished with the conversation.
+
+**Example phrases that trigger `end_call`:**
+- "Ok, I'm done for today, thank you."
+- "That is everything, bye"
+- "I'm all set, thanks"
+
+**Function parameters:**
+- `reason` (string): Short reason for ending the call
+- `note` (string, optional): Additional context or notes
+
+#### `handoff_to_human`
+Triggers when the user requests to speak with a human agent or indicates they need human assistance.
+
+**Example phrases that trigger `handoff_to_human`:**
+- "I want to speak to a person"
+- "Put me through to a human agent"
+- "Can I talk to someone?"
+
+**Function parameters:**
+- `reason` (string): Why the caller wants a human
+- `department` (string, optional): Target department or queue
+
+### How It Works
+
+1. **Function Detection**: OpenAI's model analyzes user input and determines if it should call a function
+2. **Function Execution**: The server receives the function call arguments and executes the appropriate action
+3. **Graceful Termination**: The AI provides a brief farewell message, then the server initiates Genesys call termination
+4. **Architect Integration**: The disconnect reason is passed back to Genesys Architect for flow branching
+
+### Integration Benefits
+
+- **Natural Conversations**: Users can end calls conversationally without specific keywords
+- **Intelligent Escalation**: Automatic detection of human agent requests
+- **Architect Flow Control**: Different disconnect reasons allow for conditional branching in Architect flows
+- **Reduced Manual Logic**: Less need for complex timeout or keyword-based termination rules
