@@ -208,7 +208,7 @@ class OpenAIRealtimeClient:
                         "type": "realtime",
                         "model": self.model,
                         "instructions": self.final_instructions,
-                        "output_modalities": ["audio", "text"],
+                        "output_modalities": ["audio"],
                         "audio": {
                             "input": {
                                 "format": {
