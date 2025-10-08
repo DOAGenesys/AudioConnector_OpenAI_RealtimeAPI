@@ -229,9 +229,7 @@ class OpenAIRealtimeClient:
                                 },
                                 "voice": self.voice
                             }
-                        },
-                        "temperature": self.temperature,
-                        "max_output_tokens": self.max_output_tokens
+                        }
                     }
                 }
 
