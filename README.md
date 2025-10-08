@@ -82,7 +82,7 @@ GENESYS_API_KEY=<your_shared_secret_with_genesys>
 
 # OpenAI Configuration
 OPENAI_API_KEY=<your_openai_api_key>
-OPENAI_MODEL=gpt-4o-mini-realtime-preview
+OPENAI_MODEL=gpt-realtime-mini
 OPENAI_VOICE=echo
 
 # Debug Settings
