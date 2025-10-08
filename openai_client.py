@@ -369,16 +369,33 @@ class OpenAIRealtimeClient:
                                 if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
                                     self._summary_future.set_result(msg_dict)
 
-                                out = msg_dict.get("response", {}).get("output", [])
+                                out = (
+                                    msg_dict.get("response", {}).get("output", [])
+                                    or msg_dict.get("response", {}).get("content", [])
+                                )
                                 for item in out:
-                                    if item.get("type") == "function_call":
-                                        name = item.get("name")
-                                        call_id = item.get("call_id")
-                                        args_raw = item.get("arguments")
+                                    item_type = item.get("type")
+                                    if item_type in ("function_call", "tool_call", "tool", "function"):
+                                        name = (
+                                            item.get("name")
+                                            or (item.get("function") or {}).get("name")
+                                        )
+                                        call_id = item.get("call_id") or item.get("id")
+                                        args_raw = (
+                                            item.get("arguments")
+                                            or item.get("input")
+                                            or item.get("args")
+                                            or item.get("parameters")
+                                            or (item.get("function") or {}).get("arguments")
+                                        )
                                         try:
                                             args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
                                         except Exception:
                                             args = {}
+                                        if DEBUG == 'true':
+                                            self.logger.debug(
+                                                f"Detected tool/function call: name={name}, call_id={call_id}, args={args}"
+                                            )
                                         await self._handle_function_call(name, call_id, args)
 
                                 if self._await_disconnect_on_done and self._disconnect_context:
