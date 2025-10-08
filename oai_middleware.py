@@ -3,7 +3,7 @@ import json
 import uuid
 import logging
 import websockets
-from websockets.http import Response
+import http
 import os
 
 from config import (
@@ -18,10 +18,7 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(connection, request):
-    path = request.path
-    request_headers = request.headers
-    
+async def validate_request(path, request_headers):
     logger.info(f"\n{'='*50}\n[HTTP] Incoming request validation")
     logger.info(f"[HTTP] Request path: {path}")
     logger.info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
@@ -60,14 +57,14 @@ async def validate_request(connection, request):
     if normalized_path == '/' or normalized_path == '':
         if upgrade_header != 'websocket':
             logger.info("[HTTP] Health check request detected at root path, returning 200 OK")
-            return Response(200, "OK", [], b'OK\n')
+            return http.HTTPStatus.OK, [], b'OK\n'
 
     if normalized_path != normalized_target:
         logger.error("[HTTP] Path mismatch:")
         logger.error(f"[HTTP]   Expected: {GENESYS_PATH}")
         logger.error(f"[HTTP]   Normalized received: {normalized_path}")
         logger.error(f"[HTTP]   Normalized expected: {normalized_target}")
-        return Response(404, "Not Found", [], b'Invalid path\n')
+        return http.HTTPStatus.NOT_FOUND, [], b'Invalid path\n'
 
     # --- Start of Security Update ---
     # Check for the presence and value of the x-api-key
@@ -75,11 +72,11 @@ async def validate_request(connection, request):
 
     if not incoming_api_key:
         logger.error("[HTTP] Connection rejected - Missing 'x-api-key' header.")
-        return Response(401, "Unauthorized", [], b"Missing 'x-api-key' header\n")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Missing 'x-api-key' header\n"
 
     if incoming_api_key != GENESYS_API_KEY:
         logger.error("[HTTP] Connection rejected - Invalid API Key.")
-        return Response(401, "Unauthorized", [], b"Invalid API Key\n")
+        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API Key\n"
 
     logger.info("[HTTP] API Key validation successful.")
     # --- End of Security Update ---
@@ -106,26 +103,26 @@ async def validate_request(connection, request):
         error_msg = f"Missing required headers (excluding x-api-key): {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return Response(400, "Bad Request", [], error_msg.encode())
+        return http.HTTPStatus.BAD_REQUEST, [], error_msg.encode()
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
     if upgrade_header != 'websocket':
         error_msg = f"Invalid upgrade header: {upgrade_header}"
         logger.error(f"[HTTP] {error_msg}")
-        return Response(400, "Bad Request", [], b'WebSocket upgrade required\n')
+        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket upgrade required\n'
 
     ws_version = header_keys.get('sec-websocket-version', '')
     logger.info(f"[HTTP] Checking WebSocket version: {ws_version}")
     if ws_version != '13':
         error_msg = f"Invalid WebSocket version: {ws_version}"
         logger.error(f"[HTTP] {error_msg}")
-        return Response(400, "Bad Request", [], b'WebSocket version 13 required\n')
+        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket version 13 required\n'
 
     ws_key = header_keys.get('sec-websocket-key')
     if not ws_key:
         logger.error("[HTTP] Missing WebSocket key")
-        return Response(400, "Bad Request", [], b'WebSocket key required\n')
+        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket key required\n'
     logger.info("[HTTP] Found valid WebSocket key")
 
     ws_protocol = header_keys.get('sec-websocket-protocol', '')
