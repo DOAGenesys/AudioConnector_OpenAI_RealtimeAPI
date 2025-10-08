@@ -141,6 +141,11 @@ Add the following environment variables in the app settings:
 
 <img width="898" height="1185" alt="image" src="https://github.com/user-attachments/assets/778872e3-315c-4995-af44-5f7284d95ad8" />
 
+#### Step 6: Health config
+
+- Make sure the "Health Checks" config is like this:
+
+<img width="841" height="1104" alt="image" src="https://github.com/user-attachments/assets/c7fce6c0-03ce-4bb3-8221-3d30a9e3951e" />
 
 
 - Once the app is deployed, note your deployment URL (e.g., `https://your-app-xxxxx.ondigitalocean.app`):
