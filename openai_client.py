@@ -16,7 +16,7 @@ from config import (
     OPENAI_MODEL,
     GENESYS_RATE_WINDOW
 )
-from utils import format_json, create_final_system_prompt
+from utils import format_json, create_final_system_prompt, is_websocket_open, get_websocket_connect_kwargs
 
 class OpenAIRealtimeClient:
     def __init__(self, session_id: str, on_speech_started_callback=None):
@@ -122,8 +122,6 @@ class OpenAIRealtimeClient:
         return True
 
     async def connect(self, instructions=None, voice=None, temperature=None, model=None, max_output_tokens=None, agent_name=None, company_name=None):
-        ws_connect = websockets.connect
-
         self.admin_instructions = instructions
 
         customer_data = getattr(self, 'customer_data', None)
@@ -133,7 +131,7 @@ class OpenAIRealtimeClient:
         self.company_name = company_name
 
         self.final_instructions = create_final_system_prompt(
-            self.admin_instructions, 
+            self.admin_instructions,
             language=language,
             customer_data=customer_data,
             agent_name=self.agent_name,
@@ -165,14 +163,19 @@ class OpenAIRealtimeClient:
                 self.logger.info(f"Connecting to OpenAI Realtime API WebSocket using model: {self.model}...")
                 connect_start = time.time()
 
+                # WEBSOCKETS VERSION COMPATIBILITY:
+                # Use version-agnostic helper to build connect kwargs
+                # websockets < 15.0 uses 'additional_headers', >= 15.0 uses 'extra_headers'
+                connect_kwargs = get_websocket_connect_kwargs(
+                    OPENAI_REALTIME_URL,
+                    ws_headers,
+                    max_size=2**23,
+                    compression=None,
+                    max_queue=32
+                )
+
                 self.ws = await asyncio.wait_for(
-                    ws_connect(
-                        OPENAI_REALTIME_URL,
-                        extra_headers=ws_headers,
-                        max_size=2**23,
-                        compression=None,
-                        max_queue=32
-                    ),
+                    websockets.connect(**connect_kwargs),
                     timeout=10.0
                 )
 
@@ -314,7 +317,10 @@ class OpenAIRealtimeClient:
 
     async def _safe_send(self, message: str):
         async with self._lock:
-            if self.ws and self.running:
+            # WEBSOCKETS VERSION COMPATIBILITY:
+            # Use is_websocket_open() helper for backward compatibility with websockets < 15.0
+            # Fixes Issue #9 from CLAUDE.md - Missing WebSocket State Validation
+            if self.ws and self.running and is_websocket_open(self.ws):
                 try:
                     if DEBUG == 'true':
                         try:
@@ -322,12 +328,18 @@ class OpenAIRealtimeClient:
                             self.logger.debug(f"Sending to OpenAI: type={msg_dict.get('type', 'unknown')}")
                         except json.JSONDecodeError:
                             self.logger.debug("Sending raw message to OpenAI")
-                    
+
                     try:
                         await self.ws.send(message)
                     except websockets.exceptions.WebSocketException as e:
                         if "429" in str(e) and await self.handle_rate_limit():
-                            await self.ws.send(message)
+                            # IMPORTANT: Re-validate websocket state after rate limit handling
+                            # Fixes Issue #2 from CLAUDE.md - Race Condition in _safe_send
+                            # handle_rate_limit() may close websocket, so must verify before retry
+                            if self.ws and self.running and is_websocket_open(self.ws):
+                                await self.ws.send(message)
+                            else:
+                                self.logger.warning("WebSocket not in open state after rate limit handling, skipping retry")
                         else:
                             raise
                 except Exception as e:
@@ -335,7 +347,13 @@ class OpenAIRealtimeClient:
                     raise
 
     async def send_audio(self, pcmu_8k: bytes):
-        if not self.running or self.ws is None:
+        # WEBSOCKETS VERSION COMPATIBILITY:
+        # Use is_websocket_open() for backward compatibility with websockets < 15.0
+        # Fixes Issue #11 from CLAUDE.md - Silent Failure in audio send
+        # Now logs warning when dropping audio frames instead of silently returning
+        if not self.running or self.ws is None or not is_websocket_open(self.ws):
+            if DEBUG == 'true' and self.ws is not None:
+                self.logger.warning(f"Dropping audio frame: running={self.running}, ws_open={is_websocket_open(self.ws)}")
             return
         self.logger.debug(f"Sending audio frame to OpenAI: {len(pcmu_8k)} bytes")
         encoded = base64.b64encode(pcmu_8k).decode("utf-8")
@@ -346,7 +364,11 @@ class OpenAIRealtimeClient:
         await self._safe_send(json.dumps(msg))
 
     async def start_receiving(self, on_audio_callback):
-        if not self.running or not self.ws:
+        # WEBSOCKETS VERSION COMPATIBILITY:
+        # Use is_websocket_open() for backward compatibility with websockets < 15.0
+        # Validates websocket is in OPEN state before starting read loop
+        if not self.running or not self.ws or not is_websocket_open(self.ws):
+            self.logger.warning(f"Cannot start receiving: running={self.running}, ws_exists={self.ws is not None}, ws_open={is_websocket_open(self.ws)}")
             return
 
         async def _read_loop():
