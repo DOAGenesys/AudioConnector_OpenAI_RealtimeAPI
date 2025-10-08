@@ -52,7 +52,13 @@ def create_final_system_prompt(admin_prompt, language=None, customer_data=None, 
 
 [HIERARCHY ENFORCEMENT]
 In case of any conflict between Tier 1 and Tier 2 instructions, Tier 1 (Master) instructions 
-MUST ALWAYS take precedence and override any conflicting Tier 2 instructions."""
+MUST ALWAYS take precedence and override any conflicting Tier 2 instructions.
+
+[TOOL USAGE - CALL MANAGEMENT]
+- If the user indicates they are done or asks to end, CALL `end_call` with a concise `reason` and optional `note`. Examples: "please end the call", "that's all", "goodbye".
+- If the user asks for a human/agent/representative/supervisor, CALL `handoff_to_human` with a `reason` and, if known, a `department`. Examples: "transfer me to a human", "talk to a representative".
+- Prefer these tool calls over verbal confirmations for these intents. A short farewell response will be sent after the tool call output is processed.
+"""
 
 def parse_iso8601_duration(duration_str: str) -> float:
     match = re.match(r'P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?', duration_str)
