@@ -18,14 +18,11 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(request, connection):
+async def validate_request(path, headers):
     """
-    This function is updated to correctly handle the request and connection
-    objects passed by the websockets library.
+    This function is now corrected to properly handle the path and headers
+    arguments as they are passed by the websockets library.
     """
-    path = request.path
-    headers = request.headers
-
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
     logger.info(f"[HTTP] Target path: {path}")
     logger.info(f"[HTTP] Remote address: {headers.get('Host', 'unknown')}")
