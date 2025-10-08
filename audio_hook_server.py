@@ -423,10 +423,9 @@ class AudioHookServer:
                 "type": "response.create",
                 "response": {
                     "conversation": "none",
-                    "modalities": ["text"],
+                    "output_modalities": ["text"],
                     "metadata": {"type": "ending_analysis"},
-                    "instructions": ENDING_PROMPT,
-                    "temperature": ENDING_TEMPERATURE
+                    "instructions": ENDING_PROMPT
                 }
             }
 
@@ -434,14 +433,9 @@ class AudioHookServer:
             
             summary = None
             try:
-                async with asyncio.timeout(10): 
-                    while True:
-                        msg = await self.openai_client.ws.recv()
-                        data = json.loads(msg)
-                        if (data.get("type") == "response.done" and 
-                            data.get("response", {}).get("metadata", {}).get("type") == "ending_analysis"):
-                            summary = data.get("response", {}).get("output", [{}])[0].get("text")
-                            break
+                data = await self.openai_client.await_summary(timeout=10)
+                if data:
+                    summary = data.get("response", {}).get("output", [{}])[0].get("text")
                 
                 # Parse JSON summary
                 if summary:
