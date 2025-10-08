@@ -38,6 +38,10 @@ class OpenAIRealtimeClient:
         self.rate_limit_delays = {}
         self.last_response = None
         self._summary_future = None
+        self.on_end_call_request = None
+        self.on_handoff_request = None
+        self._await_disconnect_on_done = False
+        self._disconnect_context = None
 
     async def terminate_session(self, reason="completed", final_message=None):
         try:
@@ -210,6 +214,33 @@ class OpenAIRealtimeClient:
                         "model": self.model,
                         "instructions": self.final_instructions,
                         "output_modalities": ["audio"],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "end_call",
+                                "description": "End the phone call when the user's request is complete or they say they are done.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "reason": {"type": "string", "description": "Short reason for ending the call"},
+                                        "note": {"type": "string", "description": "Optional additional notes"}
+                                    }
+                                }
+                            },
+                            {
+                                "type": "function",
+                                "name": "handoff_to_human",
+                                "description": "Escalate the call to a human agent when requested by the caller.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "reason": {"type": "string", "description": "Why the caller wants a human"},
+                                        "department": {"type": "string", "description": "Target department or queue"}
+                                    }
+                                }
+                            }
+                        ],
+                        "tool_choice": "auto",
                         "audio": {
                             "input": {
                                 "format": {
@@ -337,8 +368,41 @@ class OpenAIRealtimeClient:
                                 meta = msg_dict.get("response", {}).get("metadata", {})
                                 if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
                                     self._summary_future.set_result(msg_dict)
+
+                                out = msg_dict.get("response", {}).get("output", [])
+                                for item in out:
+                                    if item.get("type") == "function_call":
+                                        name = item.get("name")
+                                        call_id = item.get("call_id")
+                                        args_raw = item.get("arguments")
+                                        try:
+                                            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                                        except Exception:
+                                            args = {}
+                                        await self._handle_function_call(name, call_id, args)
+
+                                if self._await_disconnect_on_done and self._disconnect_context:
+                                    ctx = self._disconnect_context
+                                    self._await_disconnect_on_done = False
+                                    self._disconnect_context = None
+                                    try:
+                                        if ctx.get("action") == "end_call":
+                                            if callable(self.on_end_call_request):
+                                                await self.on_end_call_request(ctx.get("reason", "completed"), ctx.get("info", ""))
+                                        elif ctx.get("action") == "handoff_to_human":
+                                            if callable(self.on_handoff_request):
+                                                await self.on_handoff_request("transfer", ctx.get("info", "handoff_to_human"))
+                                            elif callable(self.on_end_call_request):
+                                                await self.on_end_call_request("transfer", ctx.get("info", "handoff_to_human"))
+                                    except Exception as e:
+                                        self.logger.error(f"Error invoking disconnect callback: {e}")
                             except Exception:
                                 pass
+                        elif ev_type == "response.function_call_arguments.delta":
+                            # Optional: could stream arguments, but we'll act on response.done
+                            pass
+                        elif ev_type == "response.created":
+                            pass
                     except json.JSONDecodeError:
                         if DEBUG == 'true':
                             self.logger.debug("Received raw message from OpenAI (non-JSON)")
@@ -350,6 +414,54 @@ class OpenAIRealtimeClient:
                 self.running = False
 
         self.read_task = asyncio.create_task(_read_loop())
+
+    async def _handle_function_call(self, name: str, call_id: str, args: dict):
+        try:
+            output_payload = {}
+            action = None
+            info = None
+            if name == "end_call":
+                action = "end_call"
+                reason = (args or {}).get("reason") or "User indicated conversation is complete"
+                info = (args or {}).get("note") or reason
+                output_payload = {"result": "ok", "action": action, "reason": reason}
+                # Schedule disconnect after model generates a short closing
+                self._disconnect_context = {"action": action, "reason": "completed", "info": info}
+                self._await_disconnect_on_done = True
+            elif name == "handoff_to_human":
+                action = "handoff_to_human"
+                reason = (args or {}).get("reason") or "Caller requested human agent"
+                department = (args or {}).get("department")
+                output_payload = {"result": "ok", "action": action, "reason": reason, "department": department}
+                info = reason if not department else f"{reason}. dept={department}"
+                self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
+                self._await_disconnect_on_done = True
+            else:
+                output_payload = {"result": "ignored", "reason": "unknown_function"}
+
+            event1 = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(output_payload)
+                }
+            }
+            await self._safe_send(json.dumps(event1))
+
+            # Ask model to produce a short, final audio message
+            event2 = {
+                "type": "response.create",
+                "response": {
+                    "conversation": "none",
+                    "output_modalities": ["audio"],
+                    "instructions": "Acknowledge the user's request and say a brief, courteous goodbye in one short sentence.",
+                    "metadata": {"type": "final_farewell"}
+                }
+            }
+            await self._safe_send(json.dumps(event2))
+        except Exception as e:
+            self.logger.error(f"Error handling function call {name}: {e}")
 
     async def close(self):
         duration = time.time() - self.start_time
