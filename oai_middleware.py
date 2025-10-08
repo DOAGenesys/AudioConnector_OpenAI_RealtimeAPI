@@ -19,30 +19,18 @@ from utils import format_json
 from datetime import datetime
 
 async def validate_request(path, request_headers):
-    """
-    This function is now definitively corrected to properly handle the path and
-    headers arguments as they are passed by the websockets library.
-    """
-    actual_path = path
-    headers = request_headers
-
     logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {actual_path}")
-    logger.info(f"[HTTP] Remote address: {headers.get('Host', 'unknown')}")
-
-    # Handle health checks from the deployment platform
-    if actual_path == "/":
-        logger.info("[HTTP] Health check request received. Responding with 200 OK.")
-        return http.HTTPStatus.OK, [], b"OK\n"
+    logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
+    logger.info(f"[HTTP] Remote address: {request_headers.get('Host', 'unknown')}")
 
     logger.info("[HTTP] Full headers received:")
-    for name, value in headers.items():
+    for name, value in request_headers.items():
         if name.lower() in ['x-api-key', 'authorization']:
             logger.info(f"[HTTP]   {name}: {'*' * 8}")
         else:
             logger.info(f"[HTTP]   {name}: {value}")
 
-    normalized_path = actual_path.rstrip('/')
+    normalized_path = path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
 
     if normalized_path != normalized_target:
@@ -54,7 +42,7 @@ async def validate_request(path, request_headers):
 
     # --- Start of Security Update ---
     # Check for the presence and value of the x-api-key
-    header_keys = {k.lower(): v for k, v in headers.items()}
+    header_keys = {k.lower(): v for k, v in request_headers.items()}
     incoming_api_key = header_keys.get('x-api-key')
 
     if not incoming_api_key:
@@ -190,23 +178,6 @@ async def handle_genesys_connection(websocket):
     finally:
         logger.info(f"[WS-{connection_id}] Connection handler finished\n{'='*50}")
 
-def select_subprotocol(request, available_subprotocols):
-    """
-    Selects a subprotocol to use for the WebSocket connection.
-    """
-    requested = request.headers.get("Sec-WebSocket-Protocol")
-    if requested:
-        logger.info(f"[HTTP] Client requested subprotocols: {requested}")
-        # Split and strip whitespace
-        protocols = [p.strip() for p in requested.split(',')]
-        for p in protocols:
-            if p in available_subprotocols:
-                logger.info(f"[HTTP] Selected subprotocol: {p}")
-                return p
-    logger.info("[HTTP] No matching subprotocol found or none requested.")
-    return None
-
-
 async def main():
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8080))
@@ -235,8 +206,7 @@ Log File: {os.path.abspath(LOG_FILE)}
             handle_genesys_connection,
             host,
             port,
-            process_request=validate_request,
-            select_subprotocol=select_subprotocol,
+            process_request=validate_request, # Use the updated validation function
             max_size=64000,
             ping_interval=None,
             ping_timeout=None
