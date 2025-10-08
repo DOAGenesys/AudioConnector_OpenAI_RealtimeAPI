@@ -34,7 +34,7 @@ if not OPENAI_API_KEY:
 
 OPENAI_MODEL = os.getenv('OPENAI_MODEL')
 if not OPENAI_MODEL:
-    OPENAI_MODEL = "gpt-4o-mini-realtime-preview"
+    OPENAI_MODEL = "gpt-realtime-mini"
 
 DEFAULT_AGENT_NAME = os.getenv('AGENT_NAME', 'AI Assistant')
 DEFAULT_COMPANY_NAME = os.getenv('COMPANY_NAME', 'Our Company')
