@@ -117,7 +117,7 @@ class OpenAIRealtimeClient:
         return True
 
     async def connect(self, instructions=None, voice=None, temperature=None, model=None, max_output_tokens=None, agent_name=None, company_name=None):
-        from websockets.asyncio.client import connect as ws_connect
+        ws_connect = websockets.connect
 
         self.admin_instructions = instructions
 
