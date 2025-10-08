@@ -37,6 +37,7 @@ class OpenAIRealtimeClient:
         self.last_retry_time = 0
         self.rate_limit_delays = {}
         self.last_response = None
+        self._summary_future = None
 
     async def terminate_session(self, reason="completed", final_message=None):
         try:
@@ -322,7 +323,7 @@ class OpenAIRealtimeClient:
                         if DEBUG == 'true':
                             self.logger.debug(f"Received from OpenAI: type={ev_type}")
 
-                        if ev_type == "response.audio.delta":
+                        if ev_type in ("response.audio.delta", "response.output_audio.delta"):
                             delta_b64 = msg_dict.get("delta", "")
                             if delta_b64:
                                 pcmu_8k = base64.b64decode(delta_b64)
@@ -332,6 +333,12 @@ class OpenAIRealtimeClient:
                                 await self.on_speech_started_callback()
                         elif ev_type == "response.done":
                             self.last_response = msg_dict.get("response", {})
+                            try:
+                                meta = msg_dict.get("response", {}).get("metadata", {})
+                                if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
+                                    self._summary_future.set_result(msg_dict)
+                            except Exception:
+                                pass
                     except json.JSONDecodeError:
                         if DEBUG == 'true':
                             self.logger.debug("Received raw message from OpenAI (non-JSON)")
@@ -357,6 +364,14 @@ class OpenAIRealtimeClient:
         if self.read_task:
             self.read_task.cancel()
             self.read_task = None
+
+    async def await_summary(self, timeout: float = 10.0):
+        loop = asyncio.get_event_loop()
+        self._summary_future = loop.create_future()
+        try:
+            return await asyncio.wait_for(self._summary_future, timeout=timeout)
+        finally:
+            self._summary_future = None
 
     async def disconnect_session(self, reason="completed", info=""):
         await self.close()
