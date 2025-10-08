@@ -18,24 +18,26 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(path, request_headers):
-    logger.info(f"\n{'='*50}\n[HTTP] Starting WebSocket upgrade validation")
-    logger.info(f"[HTTP] Target path: {GENESYS_PATH}")
+async def validate_request(connection, request):
+    path = request.path
+    request_headers = request.headers
+    
+    logger.info(f"\n{'='*50}\n[HTTP] Incoming request validation")
+    logger.info(f"[HTTP] Request path: {path}")
+    logger.info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
 
     def build_header_map(source):
-        # websockets may pass either a Headers-like mapping or a Request object
-        headers_obj = getattr(source, 'headers', source)
         pairs = None
-        raw_items = getattr(headers_obj, 'raw_items', None)
+        raw_items = getattr(source, 'raw_items', None)
         if callable(raw_items):
             pairs = list(raw_items())
         else:
-            items_fn = getattr(headers_obj, 'items', None)
+            items_fn = getattr(source, 'items', None)
             if callable(items_fn):
                 pairs = list(items_fn())
         if pairs is None:
             try:
-                pairs = list(headers_obj)
+                pairs = list(source)
             except Exception:
                 pairs = []
         return {str(k).lower(): str(v) for k, v in pairs}
