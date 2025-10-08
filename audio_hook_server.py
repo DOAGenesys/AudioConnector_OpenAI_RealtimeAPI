@@ -343,6 +343,7 @@ class AudioHookServer:
             # Wire callbacks for function-calling driven disconnects
             self.openai_client.on_end_call_request = self._on_end_call_request
             self.openai_client.on_handoff_request = self._on_handoff_request
+            self.logger.info("OpenAI callbacks wired: on_end_call_request and on_handoff_request")
             await self.openai_client.connect(
                 instructions=instructions,
                 voice=voice,
@@ -364,10 +365,12 @@ class AudioHookServer:
         await self.openai_client.start_receiving(on_audio_callback)
 
     async def _on_end_call_request(self, reason: str, info: str):
+        self.logger.info(f"OpenAI requested end_call. reason={reason}, info={info}")
         # Ensure we request a graceful Genesys disconnect
         await self.disconnect_session(reason=reason or "completed", info=info or "")
 
     async def _on_handoff_request(self, reason: str, info: str):
+        self.logger.info(f"OpenAI requested handoff_to_human. reason={reason}, info={info}")
         # Use a distinct reason for Architect branching, e.g., "transfer"
         await self.disconnect_session(reason=reason or "transfer", info=info or "handoff_to_human")
 
