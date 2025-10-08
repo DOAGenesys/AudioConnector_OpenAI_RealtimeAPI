@@ -212,15 +212,10 @@ class OpenAIRealtimeClient:
                         "audio": {
                             "input": {
                                 "format": {
-                                    "type": "audio/pcmu",
-                                    "rate": 8000
+                                    "type": "audio/pcmu"
                                 },
                                 "turn_detection": {
-                                    "type": "semantic_vad",
-                                    "threshold": 0.5,
-                                    "prefix_padding_ms": 300,
-                                    "silence_duration_ms": 500,
-                                    "create_response": True
+                                    "type": "semantic_vad"
                                 }
                             },
                             "output": {
