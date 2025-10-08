@@ -343,7 +343,7 @@ class AudioHookServer:
             # Wire callbacks for function-calling driven disconnects
             self.openai_client.on_end_call_request = self._on_end_call_request
             self.openai_client.on_handoff_request = self._on_handoff_request
-            self.logger.info("OpenAI callbacks wired: on_end_call_request and on_handoff_request")
+            self.logger.info("[FunctionCall] OpenAI callbacks wired: on_end_call_request and on_handoff_request")
             await self.openai_client.connect(
                 instructions=instructions,
                 voice=voice,
@@ -365,12 +365,12 @@ class AudioHookServer:
         await self.openai_client.start_receiving(on_audio_callback)
 
     async def _on_end_call_request(self, reason: str, info: str):
-        self.logger.info(f"OpenAI requested end_call. reason={reason}, info={info}")
+        self.logger.info(f"[FunctionCall] OpenAI requested end_call. reason={reason}, info={info}")
         # Ensure we request a graceful Genesys disconnect
         await self.disconnect_session(reason=reason or "completed", info=info or "")
 
     async def _on_handoff_request(self, reason: str, info: str):
-        self.logger.info(f"OpenAI requested handoff_to_human. reason={reason}, info={info}")
+        self.logger.info(f"[FunctionCall] OpenAI requested handoff_to_human. reason={reason}, info={info}")
         # Use a distinct reason for Architect branching, e.g., "transfer"
         await self.disconnect_session(reason=reason or "transfer", info=info or "handoff_to_human")
 
@@ -513,11 +513,13 @@ class AudioHookServer:
             if not self.session_id:
                 return
 
+            self.logger.info(f"[FunctionCall] Initiating server-side disconnect. reason={reason}, info={info}")
+
             # Generate summary before disconnecting
             summary_data = await self.generate_session_summary()
 
             # Get token usage from OpenAI client's last response if available
-            token_metrics = {"usage": {}}
+            token_metrics = {}
             if self.openai_client and hasattr(self.openai_client, 'last_response'):
                 usage = self.openai_client.last_response.get("usage", {})
                 token_details = usage.get("input_token_details", {})
@@ -532,6 +534,13 @@ class AudioHookServer:
                     "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
                     "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
                 }
+                self.logger.info(f"[FunctionCall] Token usage: {token_metrics}")
+
+            output_vars = {
+                "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
+                "CONVERSATION_DURATION": str(time.time() - self.start_time),
+                **token_metrics
+            }
 
             disconnect_msg = {
                 "version": "2", 
@@ -542,21 +551,21 @@ class AudioHookServer:
                 "parameters": {
                     "reason": reason,
                     "info": info,
-                    "outputVariables": {
-                        "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
-                        "CONVERSATION_DURATION": str(time.time() - self.start_time),
-                        **token_metrics
-                    }
+                    "outputVariables": output_vars
                 }
             }
             self.server_seq += 1
+            
+            self.logger.info(f"[FunctionCall] Sending disconnect message to Genesys with {len(output_vars)} output variables")
             await asyncio.wait_for(self._send_json(disconnect_msg), timeout=5.0)
+            
             try:
                 await asyncio.wait_for(self.ws.wait_closed(), timeout=5.0)
+                self.logger.info(f"[FunctionCall] Genesys acknowledged disconnect for session {self.session_id}")
             except asyncio.TimeoutError:
-                logger.warning(f"Client did not acknowledge disconnect for session {self.session_id}")
+                logger.warning(f"[FunctionCall] Timeout waiting for Genesys to acknowledge disconnect for session {self.session_id}")
         except Exception as e:
-            logger.error(f"Error in disconnect_session: {e}")
+            logger.error(f"[FunctionCall] Error in disconnect_session: {e}")
         finally:
             self.running = False
             await self.stop_audio_processing()
