@@ -212,7 +212,7 @@ class OpenAIRealtimeClient:
                         "audio": {
                             "input": {
                                 "format": {
-                                    "type": "audio/g711_ulaw",
+                                    "type": "audio/pcmu",
                                     "rate": 8000
                                 },
                                 "turn_detection": {
@@ -225,7 +225,7 @@ class OpenAIRealtimeClient:
                             },
                             "output": {
                                 "format": {
-                                    "type": "audio/g711_ulaw"
+                                    "type": "audio/pcmu"
                                 },
                                 "voice": self.voice
                             }
