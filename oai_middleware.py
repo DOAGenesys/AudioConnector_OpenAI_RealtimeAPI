@@ -32,6 +32,14 @@ async def validate_request(path, request_headers):
 
     normalized_path = path.rstrip('/')
     normalized_target = GENESYS_PATH.rstrip('/')
+    
+    header_keys = {k.lower(): v for k, v in request_headers.items()}
+    upgrade_header = header_keys.get('upgrade', '').lower()
+    
+    if normalized_path == '/' or normalized_path == '':
+        if upgrade_header != 'websocket':
+            logger.info("[HTTP] Health check request detected at root path, returning 200 OK")
+            return http.HTTPStatus.OK, [], b'OK\n'
 
     if normalized_path != normalized_target:
         logger.error("[HTTP] Path mismatch:")
@@ -42,7 +50,6 @@ async def validate_request(path, request_headers):
 
     # --- Start of Security Update ---
     # Check for the presence and value of the x-api-key
-    header_keys = {k.lower(): v for k, v in request_headers.items()}
     incoming_api_key = header_keys.get('x-api-key')
 
     if not incoming_api_key:
