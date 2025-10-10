@@ -29,6 +29,13 @@ from collections import deque
 
 class AudioHookServer:
     def __init__(self, websocket):
+        """
+        Initializes the instance of a class responsible for managing a websocket connection for
+        audio integration, alongside managing state, rate limits, audio buffer, and task scheduling.
+
+        :param websocket: An object representing the websocket connection to manage.
+        :type websocket: any
+        """
         self.session_id = str(uuid.uuid4())
         self.ws = websocket
         self.client_seq = 0
@@ -53,12 +60,30 @@ class AudioHookServer:
         self.audio_process_task = None
         self.last_frame_time = 0
 
-        self.logger.info(f"New session started: {self.session_id}")        
+        self.logger.info(f"New session started: {self.session_id}")
 
     async def start_audio_processing(self):
+        """
+        Starts the audio processing task asynchronously.
+
+        This method creates an asyncio task to process the audio buffer. It is
+        responsible for initializing and triggering the process that handles
+        the audio data in an asynchronous manner.
+
+        :return: None
+        """
         self.audio_process_task = asyncio.create_task(self._process_audio_buffer())
 
     async def stop_audio_processing(self):
+        """
+        Stops the currently running audio processing task, if there is one.
+
+        This method checks if an audio processing task is active. If active, it cancels
+        the task and awaits its termination. The method handles the case where the task
+        may have been canceled.
+
+        :return: None
+        """
         if self.audio_process_task:
             self.audio_process_task.cancel()
             try:
@@ -68,6 +93,15 @@ class AudioHookServer:
             self.audio_process_task = None
 
     async def _process_audio_buffer(self):
+        """
+        Process and send audio frames from the buffer asynchronously. Continuously monitors and sends
+        audio frames from a buffer to a WebSocket connection in a controlled manner, ensuring that
+        audio frames are sent only if a specific time interval has elapsed and resources are available.
+        Handles errors and manages the buffer to avoid overflow.
+
+        :raises asyncio.CancelledError: If the task is canceled during execution.
+        :raises Exception: If an unexpected error occurs during audio processing.
+        """
         try:
             while self.running:
                 if self.audio_buffer:
@@ -118,7 +152,7 @@ class AudioHookServer:
 
             if retry_after is None and hasattr(self.ws, 'response_headers'):
                 http_retry_after = (
-                    self.ws.response_headers.get('Retry-After') or 
+                    self.ws.response_headers.get('Retry-After') or
                     self.ws.response_headers.get('retry-after')
                 )
                 if http_retry_after:
@@ -209,6 +243,11 @@ class AudioHookServer:
         return False
 
     async def handle_message(self, msg: dict):
+        """
+        Handle the incoming message from Genesys audio hook server
+        :param msg:
+        :return:
+        """
         msg_type = msg.get("type")
         seq = msg.get("seq", 0)
         self.client_seq = seq
@@ -219,6 +258,7 @@ class AudioHookServer:
 
         if msg_type == "error":
             handled = await self.handle_error(msg)
+            # TODO: If not handled then falls through checking for other types that it cannot be
             if handled:
                 return
 
@@ -306,7 +346,7 @@ class AudioHookServer:
         language = input_vars.get("LANGUAGE")
         customer_data = input_vars.get("CUSTOMER_DATA")
         agent_name = input_vars.get("AGENT_NAME", DEFAULT_AGENT_NAME)
-        company_name = next((value for key, value in input_vars.items() 
+        company_name = next((value for key, value in input_vars.items()
                             if key.strip() == "COMPANY_NAME"), DEFAULT_COMPANY_NAME)
 
         self.logger.info(f"Using voice: {voice}")
@@ -444,13 +484,11 @@ class AudioHookServer:
             }
 
             await self.openai_client._safe_send(json.dumps(ending_prompt))
-            
             summary = None
             try:
                 data = await self.openai_client.await_summary(timeout=10)
                 if data:
                     summary = data.get("response", {}).get("output", [{}])[0].get("text")
-                
                 # Parse JSON summary
                 if summary:
                     try:
@@ -459,11 +497,9 @@ class AudioHookServer:
                     except json.JSONDecodeError:
                         self.logger.error("Failed to parse summary JSON")
                         return {"error": "Failed to parse summary"}
-                    
             except asyncio.TimeoutError:
                 self.logger.error("Timeout generating session summary")
                 return {"error": "Timeout generating summary"}
-                
         except Exception as e:
             self.logger.error(f"Error generating session summary: {e}")
             return {"error": str(e)}
@@ -473,8 +509,7 @@ class AudioHookServer:
         Update the handle_close method to include summary generation
         """
         self.logger.info(f"Received 'close' from Genesys. Reason: {msg['parameters'].get('reason')}")
-        
-        # Generate summary before closing
+        # Generate a summary before closing
         summary = await self.generate_session_summary()
         if summary:
             self.logger.info(f"Session summary: {summary}")
@@ -525,7 +560,7 @@ class AudioHookServer:
                 token_details = usage.get("input_token_details", {})
                 cached_details = token_details.get("cached_tokens_details", {})
                 output_details = usage.get("output_token_details", {})
-                
+
                 token_metrics = {
                     "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
                     "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
@@ -543,7 +578,7 @@ class AudioHookServer:
             }
 
             disconnect_msg = {
-                "version": "2", 
+                "version": "2",
                 "type": "disconnect",
                 "seq": self.server_seq + 1,
                 "clientseq": self.client_seq,
@@ -555,10 +590,10 @@ class AudioHookServer:
                 }
             }
             self.server_seq += 1
-            
+
             self.logger.info(f"[FunctionCall] Sending disconnect message to Genesys with {len(output_vars)} output variables")
             await asyncio.wait_for(self._send_json(disconnect_msg), timeout=5.0)
-            
+
             try:
                 await asyncio.wait_for(self.ws.wait_closed(), timeout=5.0)
                 self.logger.info(f"[FunctionCall] Genesys acknowledged disconnect for session {self.session_id}")
@@ -573,12 +608,32 @@ class AudioHookServer:
                 await self.openai_client.close()
 
     async def handle_audio_frame(self, frame_bytes: bytes):
+        """
+        Processes an incoming audio frame and sends it to the OpenAI client for processing
+        if the OpenAI client is available and running.
+
+        If the OpenAI client is not available or not running, the function returns
+        immediately without processing the frame. The method increments the frame
+        counter upon receiving a frame and logs the amount of data received.
+
+        The method performs asynchronous communication with the OpenAI client to
+        deliver the processed audio frame for real-time analysis.
+
+        :param frame_bytes: Audio frame data in bytes.
+        :type frame_bytes: bytes
+        :return: None
+        :rtype: None
+        """
+        # TODO: Refactor to use and on both tests
+        # TODO: self.openai_client and self.openai_client.running:
         if not self.openai_client or not self.openai_client.running:
             return
 
+        # Increment counter to keep track of frames sent
         self.audio_frames_received += 1
         self.logger.debug(f"Received audio frame from Genesys: {len(frame_bytes)} bytes (frame #{self.audio_frames_received})")
 
+        # Send audio frame to OpenAI client real-time model
         await self.openai_client.send_audio(frame_bytes)
 
     async def _send_json(self, msg: dict):

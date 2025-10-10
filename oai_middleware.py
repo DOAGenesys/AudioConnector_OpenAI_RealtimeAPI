@@ -15,10 +15,15 @@ from config import (
 )
 
 from audio_hook_server import AudioHookServer
-from utils import format_json
+from utils import format_json, is_websocket_open, get_websocket_path, get_websocket_state_name, extract_request_headers
 from datetime import datetime
 
-async def validate_request(path, request_headers):
+async def validate_request(connection, request):
+    # Extract path and headers from the connection object
+    # Use version-agnostic helpers for cross-version compatibility
+    path = get_websocket_path(connection)
+    request_headers = extract_request_headers(connection, request)
+
     logger.info(f"\n{'='*50}\n[HTTP] Incoming request validation")
     logger.info(f"[HTTP] Request path: {path}")
     logger.info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
@@ -140,6 +145,17 @@ async def validate_request(path, request_headers):
     return None
 
 async def handle_genesys_connection(websocket):
+    """
+    Handles incoming WebSocket connections from Genesys AudioHook service. This function:
+    - Creates a unique connection ID for logging
+    - Sets up an AudioHookServer instance for the connection
+    - Processes incoming messages (both binary audio frames and JSON control messages)
+    - Maintains the WebSocket connection until it's closed
+    - Handles cleanup when the connection ends
+
+    :param websocket: WebSocket connection object from websockets library
+    :return: None
+    """
     connection_id = str(uuid.uuid4())[:8]
     logger.info(f"\n{'='*50}\n[WS-{connection_id}] New WebSocket connection handler started")
 
@@ -150,45 +166,65 @@ async def handle_genesys_connection(websocket):
         logger.info(f"[WS-{connection_id}] Remote address: {websocket.remote_address}")
         logger.info(f"[WS-{connection_id}] Connection state: {websocket.state}")
 
-        ws_attributes = ['path', 'remote_address', 'local_address', 'state', 'open', 'protocol']
+        # WEBSOCKETS VERSION COMPATIBILITY:
+        # 'open' attribute removed from list - doesn't exist in websockets >= 15.0
+        # In websockets < 15.0, 'open' was a boolean attribute
+        # In websockets >= 15.0, use 'state' enum instead (State.OPEN = 1)
+        # Using version-agnostic helper functions from utils.py for path and state
         logger.info(f"[WS-{connection_id}] WebSocket object attributes:")
-        for attr in ws_attributes:
-            value = getattr(websocket, attr, "Not available")
-            logger.info(f"[WS-{connection_id}]   {attr}: {value}")
+        logger.info(f"[WS-{connection_id}]   path: {get_websocket_path(websocket)}")
+        logger.info(f"[WS-{connection_id}]   remote_address: {getattr(websocket, 'remote_address', 'Not available')}")
+        logger.info(f"[WS-{connection_id}]   local_address: {getattr(websocket, 'local_address', 'Not available')}")
+        logger.info(f"[WS-{connection_id}]   state: {get_websocket_state_name(websocket)}")
+        logger.info(f"[WS-{connection_id}]   protocol: {getattr(websocket, 'protocol', 'Not available')}")
+        # Use backward-compatible helper to check if websocket is open
+        # Works with both websockets >= 15.0 (state enum) and < 15.0 (open boolean)
+        logger.info(f"[WS-{connection_id}]   is_open: {is_websocket_open(websocket)}")
 
         logger.info(f"[WS-{connection_id}] WebSocket connection established; handshake was validated beforehand.")
 
+        # Create a new AudioHookServer instance for this connection
         session = AudioHookServer(websocket)
         logger.info(f"[WS-{connection_id}] Session created with ID: {session.session_id}")
 
         logger.info(f"[WS-{connection_id}] Starting main message loop")
+
+        # Handle messages until the connection is closed
+        # The websocket receives either binary frames or JSON messages
         while session.running:
             try:
                 logger.debug(f"[WS-{connection_id}] Waiting for next message...")
                 msg = await websocket.recv()
+                # Check for binary frame
                 if isinstance(msg, bytes):
+                    # Handle binary frame
                     logger.debug(f"[WS-{connection_id}] Received binary frame: {len(msg)} bytes")
                     await session.handle_audio_frame(msg)
                 else:
                     try:
+                        # Handle JSON message by first parsing it as JSON and then calling the handle_message method
                         data = json.loads(msg)
                         logger.debug(f"[WS-{connection_id}] Received JSON message:\n{format_json(data)}")
                         await session.handle_message(data)
                     except json.JSONDecodeError as e:
                         logger.error(f"[WS-{connection_id}] Error parsing JSON: {e}")
                         await session.disconnect_session("error", f"JSON parse error: {e}")
+                    # TODO: Are there specific exceptions that need to be handled here? Especially from the method handle_message?
                     except Exception as e:
                         logger.error(f"[WS-{connection_id}] Error processing message: {e}")
                         await session.disconnect_session("error", f"Message processing error: {e}")
-
             except websockets.ConnectionClosed as e:
+                # Connection closed normally or by client/server
                 logger.info(f"[WS-{connection_id}] Connection closed: code={e.code}, reason={e.reason}")
+                await session.disconnect_session("closed", f"Connection closed: {e.reason}")
                 break
             except Exception as e:
+                # Catch any other unexpected errors and log them
                 logger.error(f"[WS-{connection_id}] Unexpected error: {e}", exc_info=True)
                 break
 
         logger.info(f"[WS-{connection_id}] Session loop ended, cleaning up")
+        # Close the session and cleanup any open connections
         if session and session.openai_client:
             await session.openai_client.close()
         logger.info(f"[WS-{connection_id}] Session cleanup complete")
