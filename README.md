@@ -219,8 +219,8 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
-| `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
-| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
+| `DATA_ACTION_IDS` | Pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
+| `DATA_ACTION_DESCRIPTIONS` | Pipe separated descriptions of every action, aligned with `DATA_ACTION_IDS` order | Not set |
 | `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
 
 ### Output Variables (Connector → Architect)
