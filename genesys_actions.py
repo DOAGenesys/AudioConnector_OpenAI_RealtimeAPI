@@ -199,7 +199,7 @@ class GenesysOAuthClient:
                 payload = response.json()
                 expires_in = int(payload.get('expires_in', 3600))
                 ttl = min(expires_in, GENESYS_TOKEN_CACHE_TTL_SECONDS)
-                logger.debug("[GenesysOAuth] Access token obtained")
+                logger.info("[GenesysOAuth] Access token obtained")
                 return {
                     'access_token': payload['access_token'],
                     'expires_at': time.time() + ttl
