@@ -127,6 +127,17 @@ Set the following variables when you want the voice agent to call Genesys Cloud 
 
 Advanced tuning variables (`GENESYS_HTTP_TIMEOUT_SECONDS`, retry/backoff knobs, etc.) are also available in `config.py` for production hardening.
 
+#### Remote MCP Tooling
+
+The connector can also expose remote [Model Context Protocol (MCP)](https://platform.openai.com/docs/guides/tools-remote-mcp) servers and OpenAI built-in tools to the Realtime session so the voice agent can call them directly.
+
+1. Set `ENABLE_MCP_TOOLS=true`.
+2. Provide the tool list with either `MCP_TOOLS_JSON='[ ... ]'` or `MCP_SERVERS_CONFIG_PATH=docs/mcp_config.json`. The file must contain a JSON array of tool objects that follow OpenAI's Realtime spec (for example, `{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.deepwiki.com/mcp","require_approval":"never"}` or `{"type":"web_search_preview"}`).
+3. On session start we load the list once, append clear guidance to the system instructions (reminding the model to use `mcp.list_tools`/`mcp_call` events), and register the tools alongside the default call‑control and Genesys Data Action functions.
+4. The OpenAI client now emits structured logs for every `response.mcp_call*` and `mcp_list_tools*` event so MCP activity can be monitored in production.
+
+Because the entries are passed straight through to OpenAI, you can add new MCP servers or built-in tools without code changes—just update the JSON blob or file referenced by the environment variables above and redeploy.
+
 ## Deployment
 
 ### DigitalOcean App Platform
@@ -210,7 +221,7 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
-| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order. Vital for good tool usage performance | Not set |
+| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
 
 ### Output Variables (Connector → Architect)
 
@@ -232,7 +243,7 @@ These variables are returned when the session ends:
 
 Note: there are some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
 
-## Function Calling
+## Function Calling for Autonomous Call Management
 
 The middleware now exposes both call-control functions and optional Genesys Cloud Data Action tools to the OpenAI Realtime model. This lets the voice agent terminate calls, escalate to humans, or fetch real customer data without bespoke IVR logic.
 
