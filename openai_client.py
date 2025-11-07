@@ -38,6 +38,7 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
             ),
             "parameters": {
                 "type": "object",
+                "strict": True,
                 "properties": {
                     "summary": {
                         "type": "string",
@@ -46,8 +47,7 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
                 },
                 "required": ["summary"],
                 "additionalProperties": False
-            },
-            "strict": True
+            }
         },
         {
             "type": "function",
@@ -57,6 +57,7 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
             ),
             "parameters": {
                 "type": "object",
+                "strict": True,
                 "properties": {
                     "reason": {
                         "type": "string",
@@ -65,8 +66,7 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
                 },
                 "required": ["reason"],
                 "additionalProperties": False
-            },
-            "strict": True
+            }
         }
     ]
 
