@@ -36,34 +36,6 @@ This application serves as a WebSocket middleware that captures audio from Genes
 
 ## Configuration
 
-### Environment Variables
-
-Copy the example configuration file:
-
-```bash
-cp .env.local.example .env
-```
-
-Configure your `.env` file:
-
-```bash
-# Authentication
-GENESYS_API_KEY=<your_shared_secret_with_genesys>
-
-# OpenAI Configuration
-OPENAI_API_KEY=<your_openai_api_key>
-OPENAI_MODEL=gpt-realtime-mini
-OPENAI_VOICE=sage
-
-# Debug Settings
-DEBUG=true
-
-# Genesys Data Actions (optional)
-GENESYS_CLIENT_ID=
-GENESYS_CLIENT_SECRET=
-GENESYS_REGION=
-```
-
 ### Available OpenAI Voice Options:
 
 - `alloy`
@@ -152,12 +124,12 @@ These are the **required** environment variables you must set for the integratio
 
 | Variable | Description | Example Value |
 |----------|-------------|---------------|
-| `OPENAI_API_KEY` | Your OpenAI API key | `sk-proj-...` |
+| `OPENAI_API_KEY` | Your OpenAI API key | `sk-...` |
 | `OPENAI_MODEL` | OpenAI model to use | `gpt-realtime` (recommended) |
 | `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Your generated API key |
 | `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Your OAuth client ID |
 | `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Your OAuth client secret |
-| `GENESYS_REGION` | Your Genesys Cloud region | `usw2.pure.cloud` |
+| `GENESYS_REGION` | Your Genesys Cloud region | `mypurecloud.com` |
 
 **Optional Environment Variables:**
 
@@ -210,7 +182,7 @@ Create an inbound call flow with the Call Audio Connector action referencing you
 
 <img width="1389" height="1076" alt="image" src="https://github.com/user-attachments/assets/7c57d40a-81f0-4afc-b5ee-ed12996a886f" />
 
-You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v8-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` section below). Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
+You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v8-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` and `Genesys Data Action Tools` sections below), which will determine agentic tool usage. Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
 
 ## Session Variables
 
@@ -274,6 +246,77 @@ When `DATA_ACTION_IDS` are provided, the server fetches the corresponding input/
 - Each tool mirrors the required/optional fields from the data action input schema, keeping the model honest about arguments.
 - Tool output is fed back to the model immediately so it can explain results to the caller in natural language.
 - Optional redaction paths prevent sensitive fields from ever reaching the LLM.
+
+#### Configuring Data Action Session Variables
+
+Properly configuring the `DATA_ACTION_IDS` and `DATA_ACTION_DESCRIPTIONS` session variables is critical for enabling your voice agent to leverage Genesys Cloud Data Actions within its function calling toolkit. These variables work in tandem to expose specific data actions to the OpenAI Realtime model and provide the contextual information needed for the AI to understand when and how to use each tool.
+
+##### DATA_ACTION_IDS
+
+This variable contains the unique identifiers of the Genesys Cloud Data Actions you want to expose to the voice agent. Format requirements:
+
+- **Format**: Pipe-separated (`|`) list of data action IDs
+- **Structure**: Each ID follows the pattern `category_-_uuid` (e.g., `custom_-_9e9b11f4-ddfc-40d1-a7d3-d24f3815e818`)
+- **Order**: The order of IDs must exactly match the order of descriptions in `DATA_ACTION_DESCRIPTIONS`
+
+**Example:**
+
+```
+custom_-_9e9b11f4-ddfc-40d1-a7d3-d24f3815e818|custom_-_37be4e2a-805b-4b68-a7df-0fd2768c27b8|custom_-_e4744e9d-e3f2-4ad6-acf1-678717230e25|custom_-_ee93134c-f43e-4278-a5c3-5f98f9dcf4e1
+```
+
+##### DATA_ACTION_DESCRIPTIONS
+
+This variable provides natural language descriptions for each data action, helping the AI understand the purpose and appropriate usage context for each tool. Format requirements:
+
+- **Format**: Pipe-separated (`|`) list of descriptions
+- **Content**: Clear, concise descriptions explaining what each data action does, including key parameters and use cases
+- **Order**: Must align exactly with the order of IDs in `DATA_ACTION_IDS` (first description maps to first ID, second to second, etc.)
+- **Quality**: Well-written descriptions directly impact the AI's ability to select the right tool at the right time
+
+**Example:**
+
+```
+Searches knowledge base articles to address general FAQ questions, using semantic query matching with configurable confidence threshold and result limits. Use this to provide RAG responses|Retrieves complete ticket details including customer information, journey stations, departure schedule, and fare class using ticket reference number|Checks availability for ticket modifications and returns alternative departure times and fare class options with associated change fees|Updates ticket booking with new departure date/time and fare class selections after customer confirmation
+```
+
+##### Why These Variables Are Critical
+
+1. **Tool Discovery**: The middleware uses `DATA_ACTION_IDS` to fetch the input/output schemas from Genesys Cloud at session initialization, dynamically constructing OpenAI function definitions
+
+2. **AI Decision-Making**: `DATA_ACTION_DESCRIPTIONS` are embedded in the function definitions sent to OpenAI, directly influencing when and how the model chooses to invoke each tool
+
+3. **Alignment Requirement**: Mismatched order between IDs and descriptions will cause the AI to call the wrong data actions for given scenarios, leading to failed lookups or incorrect data retrieval
+
+4. **Security Boundary**: Only data actions explicitly listed in `DATA_ACTION_IDS` are exposed to the model, providing a clear security perimeter (further enforced by the optional `GENESYS_ALLOWED_DATA_ACTION_IDS` server-side allowlist)
+
+##### Configuration Best Practices
+
+- **Test Individually**: Validate each data action works correctly in Genesys Cloud before adding it to the session variables
+- **Descriptive Clarity**: Write descriptions that explain both the what and the when—include trigger phrases customers might use
+- **Maintain Order**: Double-check that the nth ID corresponds to the nth description before deploying
+- **Iterate on Descriptions**: If the AI isn't selecting the right tool, refine the descriptions rather than modifying the data action itself
+- **Use Allowlists**: Set `GENESYS_ALLOWED_DATA_ACTION_IDS` at the environment level to prevent unauthorized data actions from being exposed even if mistakenly included in session variables
+
+##### Complete Working Example
+
+**Architect Flow Configuration:**
+
+Set these variables in your Call Audio Connector action:
+
+```
+DATA_ACTION_IDS = custom_-_9e9b11f4-ddfc-40d1-a7d3-d24f3815e818|custom_-_37be4e2a-805b-4b68-a7df-0fd2768c27b8|custom_-_e4744e9d-e3f2-4ad6-acf1-678717230e25|custom_-_ee93134c-f43e-4278-a5c3-5f98f9dcf4e1
+
+DATA_ACTION_DESCRIPTIONS = Searches knowledge base articles to address general FAQ questions, using semantic query matching with configurable confidence threshold and result limits. Use this to provide RAG responses|Retrieves complete ticket details including customer information, journey stations, departure schedule, and fare class using ticket reference number|Checks availability for ticket modifications and returns alternative departure times and fare class options with associated change fees|Updates ticket booking with new departure date/time and fare class selections after customer confirmation
+```
+
+**What Happens:**
+
+1. Session starts and the middleware authenticates with Genesys Cloud
+2. Four data actions are fetched and registered as OpenAI function tools: `genesys_data_action_search_knowledge`, `genesys_data_action_get_ticket`, `genesys_data_action_check_modification_options`, `genesys_data_action_update_booking`
+3. When a caller asks "What's the baggage policy?", the AI invokes `genesys_data_action_search_knowledge` with a semantic query
+4. When a caller provides a ticket reference, the AI invokes `genesys_data_action_get_ticket` to retrieve full details
+5. All tool outputs are logged, optionally redacted, and fed back to the model for natural language explanation to the caller
 
 ### How It Works
 
