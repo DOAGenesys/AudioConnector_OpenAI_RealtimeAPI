@@ -525,6 +525,22 @@ class OpenAIRealtimeClient:
                                         self.logger.error(f"Error clearing input buffer: {e}")
                             except Exception:
                                 pass
+                        elif ev_type == "error":
+                            error_code = msg_dict.get("code")
+                            error_message = msg_dict.get("message", "No error message provided")
+                            error_type = msg_dict.get("error", {}).get("type") if isinstance(msg_dict.get("error"), dict) else None
+                            error_details = format_json(msg_dict)
+                            
+                            self.logger.error(
+                                f"[OpenAI Error] Code: {error_code}, Message: {error_message}, "
+                                f"Type: {error_type}, Full details: {error_details}"
+                            )
+                            
+                            if error_code == 429:
+                                if await self.handle_rate_limit():
+                                    await self.close()
+                                else:
+                                    self.logger.error("[OpenAI Error] Rate limit exceeded and max retries reached")
                         elif ev_type == "response.function_call_arguments.delta":
                             # Optional: could stream arguments, but we'll act on response.done
                             pass
