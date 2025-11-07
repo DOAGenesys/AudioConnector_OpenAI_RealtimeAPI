@@ -15,7 +15,6 @@ from config import (
     DEFAULT_AGENT_NAME,
     DEFAULT_COMPANY_NAME,
     DEFAULT_MAX_OUTPUT_TOKENS,
-    AUDIO_SAMPLE_RATE,
     MAX_AUDIO_BUFFER_SIZE,
     ENDING_PROMPT,
     ENDING_TEMPERATURE
@@ -60,7 +59,6 @@ class AudioHookServer:
 
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.audio_process_task = None
-        self.last_frame_time = 0
         self.genesys_tool_context = None
         self.session_outcome = {
             "escalation_required": False,
@@ -103,9 +101,9 @@ class AudioHookServer:
     async def _process_audio_buffer(self):
         """
         Process and send audio frames from the buffer asynchronously. Continuously monitors and sends
-        audio frames from a buffer to a WebSocket connection in a controlled manner, ensuring that
-        audio frames are sent only if a specific time interval has elapsed and resources are available.
-        Handles errors and manages the buffer to avoid overflow.
+        audio frames from a buffer to a WebSocket connection as fast as the rate limiter allows.
+        Genesys handles audio playback timing based on the PCMU format - we just need to send frames
+        without artificial delays.
 
         :raises asyncio.CancelledError: If the task is canceled during execution.
         :raises Exception: If an unexpected error occurs during audio processing.
@@ -113,30 +111,23 @@ class AudioHookServer:
         try:
             while self.running:
                 if self.audio_buffer:
-                    now = time.time()
-                    frame_data = self.audio_buffer[0]
-                    frame_bytes = frame_data['data']
-                    frame_duration = frame_data['duration']
-                    
-                    if now - self.last_frame_time >= frame_duration:
-                        if await self.binary_limiter.acquire():
-                            self.audio_buffer.popleft()
-                            try:
-                                await self.ws.send(frame_bytes)
-                                self.audio_frames_sent += 1
-                                self.last_frame_time = now
-                                self.logger.debug(
-                                    f"Sent audio frame from buffer: {len(frame_bytes)} bytes "
-                                    f"({frame_duration*1000:.1f}ms duration) "
-                                    f"(frame #{self.audio_frames_sent}, buffer size: {len(self.audio_buffer)})"
-                                )
-                            except websockets.ConnectionClosed:
-                                self.logger.warning("Genesys WebSocket closed while sending audio frame.")
-                                self.running = False
-                                break
-                        else:
-                            await asyncio.sleep(frame_duration / 2)
-                await asyncio.sleep(0.01)
+                    if await self.binary_limiter.acquire():
+                        frame_bytes = self.audio_buffer.popleft()
+                        try:
+                            await self.ws.send(frame_bytes)
+                            self.audio_frames_sent += 1
+                            self.logger.debug(
+                                f"Sent audio frame from buffer: {len(frame_bytes)} bytes "
+                                f"(frame #{self.audio_frames_sent}, buffer size: {len(self.audio_buffer)})"
+                            )
+                        except websockets.ConnectionClosed:
+                            self.logger.warning("Genesys WebSocket closed while sending audio frame.")
+                            self.running = False
+                            break
+                    else:
+                        await asyncio.sleep(0.01)
+                else:
+                    await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             self.logger.info("Audio processing task cancelled")
         except Exception as e:
@@ -493,15 +484,9 @@ class AudioHookServer:
 
     async def send_binary_to_genesys(self, data: bytes):
         if len(self.audio_buffer) < MAX_AUDIO_BUFFER_SIZE:
-            frame_duration = len(data) / AUDIO_SAMPLE_RATE
-            frame_data = {
-                'data': data,
-                'duration': frame_duration
-            }
-            self.audio_buffer.append(frame_data)
+            self.audio_buffer.append(data)
             self.logger.debug(
                 f"Buffered audio frame: {len(data)} bytes "
-                f"({frame_duration*1000:.1f}ms duration) "
                 f"(buffer size: {len(self.audio_buffer)})"
             )
         else:
