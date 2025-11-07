@@ -601,7 +601,7 @@ class AudioHookServer:
 
             # Get token usage from OpenAI client's last response if available
             token_metrics = {}
-            if self.openai_client and hasattr(self.openai_client, 'last_response'):
+            if self.openai_client and hasattr(self.openai_client, 'last_response') and self.openai_client.last_response:
                 usage = self.openai_client.last_response.get("usage", {})
                 token_details = usage.get("input_token_details", {})
                 cached_details = token_details.get("cached_tokens_details", {})
