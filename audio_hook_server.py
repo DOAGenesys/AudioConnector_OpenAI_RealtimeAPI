@@ -16,6 +16,8 @@ from config import (
     DEFAULT_COMPANY_NAME,
     DEFAULT_MAX_OUTPUT_TOKENS,
     MAX_AUDIO_BUFFER_SIZE,
+    AUDIO_BUFFER_WARNING_THRESHOLD_HIGH,
+    AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM,
     ENDING_PROMPT,
     ENDING_TEMPERATURE
 )
@@ -485,14 +487,29 @@ class AudioHookServer:
     async def send_binary_to_genesys(self, data: bytes):
         if len(self.audio_buffer) < MAX_AUDIO_BUFFER_SIZE:
             self.audio_buffer.append(data)
-            self.logger.debug(
-                f"Buffered audio frame: {len(data)} bytes "
-                f"(buffer size: {len(self.audio_buffer)})"
-            )
+            
+            buffer_usage = len(self.audio_buffer) / MAX_AUDIO_BUFFER_SIZE
+            
+            if buffer_usage >= AUDIO_BUFFER_WARNING_THRESHOLD_HIGH:
+                self.logger.warning(
+                    f"Audio buffer usage HIGH: {len(self.audio_buffer)}/{MAX_AUDIO_BUFFER_SIZE} frames "
+                    f"({buffer_usage*100:.1f}%) - Long response in progress"
+                )
+            elif buffer_usage >= AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM:
+                self.logger.info(
+                    f"Audio buffer usage elevated: {len(self.audio_buffer)}/{MAX_AUDIO_BUFFER_SIZE} frames "
+                    f"({buffer_usage*100:.1f}%)"
+                )
+            else:
+                self.logger.debug(
+                    f"Buffered audio frame: {len(data)} bytes "
+                    f"(buffer size: {len(self.audio_buffer)})"
+                )
         else:
-            self.logger.warning(
-                f"Audio buffer full ({len(self.audio_buffer)} frames), "
-                f"dropping frame to prevent overflow"
+            self.logger.error(
+                f"Audio buffer FULL ({len(self.audio_buffer)} frames), "
+                f"dropping frame - response may be truncated! "
+                f"Consider increasing MAX_AUDIO_BUFFER_SIZE for longer responses."
             )
 
     async def handle_ping(self, msg: dict):
