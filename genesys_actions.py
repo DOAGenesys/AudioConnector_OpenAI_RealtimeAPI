@@ -77,10 +77,17 @@ def _normalize_parameters_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
     # Ensure additionalProperties is set to false for consistency with OpenAI Realtime API
     # This prevents issues where Genesys schemas might have additionalProperties: true
     base["additionalProperties"] = False
+    
+    # Always set strict to true for consistency with call control tools
+    # This ensures the model can reliably call all functions with structured outputs
+    base["strict"] = True
 
     if not GENESYS_TOOLS_STRICT_MODE:
+        # Even without strict mode, we need consistent schema format
+        # Just don't enforce required fields on all nested properties
         return base
 
+    # When strict mode is enabled, recursively enforce strict schema rules
     def enforce(obj: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(obj, dict):
             return obj
@@ -98,7 +105,7 @@ def _normalize_parameters_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         return copy
 
     enforced = enforce(base)
-    enforced["strict"] = True
+    # strict is already set at the base level (line 82)
     return enforced
 
 
