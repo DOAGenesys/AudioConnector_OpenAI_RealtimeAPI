@@ -133,7 +133,7 @@ Because the entries are passed straight through to OpenAI, you can add new MCP s
 
 #### Step 1: DigitalOcean account creation
 
-If you don't have already one, you can get a DigitalOcean account with 200$ in free credits here:
+If you don't have already one, you can get a DigitalOcean account with 200$ in free credits here (and also, you will be helping my R&D efforts!):
 
 <a href="https://www.digitalocean.com/?refcode=e78e0ec0ec1d&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"><img src="https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%201.svg" alt="DigitalOcean Referral Badge" /></a>
 
