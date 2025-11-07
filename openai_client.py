@@ -98,6 +98,8 @@ class OpenAIRealtimeClient:
         self.tool_instruction_text: Optional[str] = None
         self.custom_tool_choice: Optional[Any] = None
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
+        self._response_in_progress = False
+        self._has_audio_in_buffer = False
 
     async def terminate_session(self, reason="completed", final_message=None):
         try:
@@ -435,6 +437,7 @@ class OpenAIRealtimeClient:
             "audio": encoded
         }
         await self._safe_send(json.dumps(msg))
+        self._has_audio_in_buffer = True
 
     async def start_receiving(self, on_audio_callback):
         # WEBSOCKETS VERSION COMPATIBILITY:
@@ -464,9 +467,15 @@ class OpenAIRealtimeClient:
                             if self.on_speech_started_callback:
                                 await self.on_speech_started_callback()
                         elif ev_type == "input_audio_buffer.speech_stopped":
-                            # End of user turn detected by OpenAI VAD → commit and request response
                             await self._commit_and_request_response()
+                        elif ev_type == "input_audio_buffer.committed":
+                            self._has_audio_in_buffer = False
+                        elif ev_type == "input_audio_buffer.cleared":
+                            self._has_audio_in_buffer = False
+                        elif ev_type == "response.created":
+                            self._response_in_progress = True
                         elif ev_type == "response.done":
+                            self._response_in_progress = False
                             self.last_response = msg_dict.get("response", {})
                             try:
                                 meta = msg_dict.get("response", {}).get("metadata", {})
@@ -518,7 +527,6 @@ class OpenAIRealtimeClient:
                                                 await self.on_end_call_request("transfer", ctx.get("info", "handoff_to_human"))
                                     except Exception as e:
                                         self.logger.error(f"Error invoking disconnect callback: {e}")
-                                    # Clear input buffer after a completed response/turn
                                     try:
                                         await self._safe_send(json.dumps({"type": "input_audio_buffer.clear"}))
                                     except Exception as e:
@@ -529,27 +537,41 @@ class OpenAIRealtimeClient:
                             error_code = msg_dict.get("code")
                             error_message = msg_dict.get("message", "No error message provided")
                             error_type = msg_dict.get("error", {}).get("type") if isinstance(msg_dict.get("error"), dict) else None
+                            error_code_str = msg_dict.get("error", {}).get("code") if isinstance(msg_dict.get("error"), dict) else None
                             error_details = format_json(msg_dict)
                             
-                            self.logger.error(
-                                f"[OpenAI Error] Code: {error_code}, Message: {error_message}, "
-                                f"Type: {error_type}, Full details: {error_details}"
-                            )
-                            
-                            if error_code == 429:
+                            if error_code_str == "input_audio_buffer_commit_empty":
+                                self.logger.debug(
+                                    f"[OpenAI] Attempted to commit empty audio buffer - "
+                                    f"this is now prevented by buffer state tracking"
+                                )
+                                self._has_audio_in_buffer = False
+                            elif error_code_str == "conversation_already_has_active_response":
+                                self.logger.debug(
+                                    f"[OpenAI] Attempted to create response while one is in progress - "
+                                    f"this is now prevented by response state tracking"
+                                )
+                                self._response_in_progress = True
+                            elif error_code == 429:
+                                self.logger.error(
+                                    f"[OpenAI Error] Code: {error_code}, Message: {error_message}, "
+                                    f"Type: {error_type}, Full details: {error_details}"
+                                )
                                 if await self.handle_rate_limit():
                                     await self.close()
                                 else:
                                     self.logger.error("[OpenAI Error] Rate limit exceeded and max retries reached")
+                            else:
+                                self.logger.error(
+                                    f"[OpenAI Error] Code: {error_code}, Message: {error_message}, "
+                                    f"Type: {error_type}, Full details: {error_details}"
+                                )
                         elif ev_type == "response.function_call_arguments.delta":
-                            # Optional: could stream arguments, but we'll act on response.done
                             pass
                         elif ev_type.startswith("response.mcp_call"):
                             self._handle_mcp_server_event(msg_dict)
                         elif ev_type.startswith("mcp_list_tools"):
                             self._handle_mcp_list_event(msg_dict)
-                        elif ev_type == "response.created":
-                            pass
                     except json.JSONDecodeError:
                         if DEBUG == 'true':
                             self.logger.debug("Received raw message from OpenAI (non-JSON)")
@@ -564,9 +586,15 @@ class OpenAIRealtimeClient:
 
     async def _commit_and_request_response(self):
         try:
-            # Finalize current input buffer
+            if self._response_in_progress:
+                self.logger.debug("Skipping commit/response request: response already in progress")
+                return
+            
+            if not self._has_audio_in_buffer:
+                self.logger.debug("Skipping commit/response request: no audio in buffer")
+                return
+            
             await self._safe_send(json.dumps({"type": "input_audio_buffer.commit"}))
-            # Ask model to respond using committed audio
             await self._safe_send(json.dumps({"type": "response.create"}))
         except Exception as e:
             self.logger.error(f"Error committing input buffer and requesting response: {e}")
