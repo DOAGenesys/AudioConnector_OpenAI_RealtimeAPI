@@ -25,6 +25,7 @@ from rate_limiter import RateLimiter
 from openai_client import OpenAIRealtimeClient
 from utils import format_json, parse_iso8601_duration
 from genesys_actions import build_genesys_tool_context
+from mcp_tools import load_mcp_tool_context
 
 from collections import deque
 
@@ -361,12 +362,24 @@ class AudioHookServer:
         except Exception as exc:
             self.logger.error(f"[GenesysTools] Failed to prepare data action tools: {exc}")
             self.genesys_tool_context = None
-        tool_definitions = None
-        tool_instructions = None
+        tool_definitions = []
+        tool_instruction_blocks = []
         if self.genesys_tool_context:
-            tool_definitions = self.genesys_tool_context.tools
-            tool_instructions = self.genesys_tool_context.instructions
-            self.logger.info(f"[FunctionCall] Enabled {len(tool_definitions)} Genesys data action tools for this session")
+            tool_definitions.extend(self.genesys_tool_context.tools)
+            if self.genesys_tool_context.instructions:
+                tool_instruction_blocks.append(self.genesys_tool_context.instructions)
+            self.logger.info(f"[FunctionCall] Enabled {len(self.genesys_tool_context.tools)} Genesys data action tools for this session")
+
+        mcp_raw_json = input_vars.get("MCP_TOOLS_JSON")
+        mcp_context = load_mcp_tool_context(mcp_raw_json, self.logger)
+        if mcp_context:
+            tool_definitions.extend(mcp_context.tools)
+            if mcp_context.instructions:
+                tool_instruction_blocks.append(mcp_context.instructions)
+            self.logger.info(f"[MCP] Enabled {len(mcp_context.tools)} MCP/built-in tool definitions for this session")
+
+        tool_definitions_payload = tool_definitions if tool_definitions else None
+        tool_instructions = "\n\n".join(block for block in tool_instruction_blocks if block) if tool_instruction_blocks else None
 
         self.logger.info(f"Using voice: {voice}")
         self.logger.debug(f"Using instructions: {instructions}")
@@ -413,7 +426,7 @@ class AudioHookServer:
                 max_output_tokens=max_output_tokens,
                 agent_name=agent_name,
                 company_name=company_name,
-                tool_definitions=tool_definitions,
+                tool_definitions=tool_definitions_payload,
                 tool_instructions=tool_instructions
             )
         except Exception as e:
