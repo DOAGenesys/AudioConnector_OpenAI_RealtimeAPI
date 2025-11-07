@@ -320,11 +320,28 @@ class OpenAIRealtimeClient:
                 }
 
                 await self._safe_send(json.dumps(session_update))
-                try:
-                    tool_names = [t.get("name") for t in session_update.get("session", {}).get("tools", [])]
-                except Exception:
-                    tool_names = []
-                self.logger.info(f"[FunctionCall] Configured OpenAI tools: {tool_names}; tool_choice=auto; voice={self.voice}")
+                tools_configured = session_update.get("session", {}).get("tools", []) or []
+                tool_descriptors = []
+                for tool in tools_configured:
+                    if isinstance(tool, dict):
+                        descriptor = (
+                            tool.get("name")
+                            or tool.get("server_label")
+                            or tool.get("server_name")
+                            or tool.get("type")
+                            or "tool"
+                        )
+                    else:
+                        descriptor = str(tool)
+                    tool_descriptors.append(descriptor)
+                tool_choice_value = session_update.get("session", {}).get("tool_choice") or "auto"
+                if isinstance(tool_choice_value, (dict, list)):
+                    choice_repr = format_json(tool_choice_value)
+                else:
+                    choice_repr = tool_choice_value
+                self.logger.info(
+                    f"[FunctionCall] Configured OpenAI tools: {tool_descriptors}; tool_choice={choice_repr}; voice={self.voice}"
+                )
 
                 updated_ok = False
                 while True:
@@ -511,6 +528,10 @@ class OpenAIRealtimeClient:
                         elif ev_type == "response.function_call_arguments.delta":
                             # Optional: could stream arguments, but we'll act on response.done
                             pass
+                        elif ev_type.startswith("response.mcp_call"):
+                            self._handle_mcp_server_event(msg_dict)
+                        elif ev_type.startswith("mcp_list_tools"):
+                            self._handle_mcp_list_event(msg_dict)
                         elif ev_type == "response.created":
                             pass
                     except json.JSONDecodeError:
@@ -633,6 +654,37 @@ class OpenAIRealtimeClient:
             await self._safe_send(json.dumps(event))
         except Exception as exc:
             self.logger.error(f"[FunctionCall] Failed to send function output for {call_id}: {exc}")
+
+    def _handle_mcp_server_event(self, event: Dict[str, Any]):
+        ev_type = event.get("type", "")
+        item_id = event.get("item_id")
+        call_id = event.get("call_id")
+        if ev_type.endswith("arguments.delta"):
+            delta = event.get("delta", "")
+            preview = delta if isinstance(delta, str) else json.dumps(delta)
+            self.logger.debug(f"[MCP] arguments.delta item={item_id} call_id={call_id}: {preview[:256]}")
+        elif ev_type.endswith("arguments.done"):
+            args = event.get("arguments", "")
+            preview = args if isinstance(args, str) else json.dumps(args)
+            self.logger.info(f"[MCP] arguments.done item={item_id} call_id={call_id}: {preview[:256]}")
+        elif ev_type.endswith(".in_progress"):
+            self.logger.debug(f"[MCP] Tool call in progress item={item_id} call_id={call_id}")
+        elif ev_type.endswith(".completed"):
+            self.logger.info(f"[MCP] Tool call completed item={item_id} call_id={call_id}")
+        elif ev_type.endswith(".failed"):
+            message = event.get("error") or event.get("message") or format_json(event)
+            self.logger.error(f"[MCP] Tool call failed item={item_id} call_id={call_id}: {str(message)[:256]}")
+
+    def _handle_mcp_list_event(self, event: Dict[str, Any]):
+        ev_type = event.get("type", "")
+        item_id = event.get("item_id")
+        if ev_type.endswith(".completed"):
+            self.logger.info(f"[MCP] mcp.list_tools completed for item={item_id}")
+        elif ev_type.endswith(".failed"):
+            message = event.get("error") or event.get("message") or format_json(event)
+            self.logger.warning(f"[MCP] mcp.list_tools failed for item={item_id}: {str(message)[:256]}")
+        else:
+            self.logger.debug(f"[MCP] mcp.list_tools.{ev_type.split('.')[-1]} item={item_id}")
 
     async def close(self):
         duration = time.time() - self.start_time
