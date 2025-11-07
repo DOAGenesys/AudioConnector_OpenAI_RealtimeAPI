@@ -450,13 +450,13 @@ class AudioHookServer:
 
     async def _on_handoff_request(self, reason: str, info: str):
         self.logger.info(f"[FunctionCall] OpenAI requested handoff_to_human. reason={reason}, info={info}")
-        escalation_reason = info or reason or "handoff_to_human"
+        escalation_reason = info or reason or "Customer requested escalation to agent"
         self.session_outcome.update({
             "escalation_required": True,
             "escalation_reason": escalation_reason,
             "completion_summary": ""
         })
-        await self.disconnect_session(reason=reason or "transfer", info=info or "handoff_to_human")
+        await self.disconnect_session(reason="completed", info=escalation_reason)
 
     async def handle_speech_started(self):
         event_msg = {
@@ -609,8 +609,39 @@ class AudioHookServer:
 
             self.logger.info(f"[FunctionCall] Initiating server-side disconnect. reason={reason}, info={info}")
 
-            # Generate summary before disconnecting
-            summary_data = await self.generate_session_summary()
+            # Wait for audio buffer to drain (send all farewell audio to Genesys before disconnecting)
+            max_wait_seconds = 10
+            wait_start = time.time()
+            while len(self.audio_buffer) > 0 and (time.time() - wait_start) < max_wait_seconds:
+                buffer_size = len(self.audio_buffer)
+                self.logger.debug(f"[FunctionCall] Waiting for audio buffer to drain: {buffer_size} frames remaining")
+                await asyncio.sleep(0.1)
+            
+            if len(self.audio_buffer) > 0:
+                self.logger.warning(f"[FunctionCall] Audio buffer still has {len(self.audio_buffer)} frames after {max_wait_seconds}s wait - proceeding with disconnect")
+            else:
+                self.logger.info(f"[FunctionCall] Audio buffer drained successfully after {time.time() - wait_start:.2f}s")
+
+            # Stop audio processing to prevent sending frames after disconnect
+            self.running = False
+            await self.stop_audio_processing()
+            self.logger.info(f"[FunctionCall] Audio processing stopped")
+
+            # Generate summary only if we don't have outcome data from function calls
+            summary_data = None
+            outcome = self.session_outcome or {}
+            has_outcome_data = outcome.get("escalation_required") or outcome.get("completion_summary")
+            
+            if not has_outcome_data and self.openai_client:
+                self.logger.info(f"[FunctionCall] Generating conversation summary before disconnect")
+                summary_data = await self.generate_session_summary()
+            elif has_outcome_data:
+                self.logger.info(f"[FunctionCall] Skipping summary generation - already have outcome data from function call")
+            
+            # Close OpenAI connection after summary (if generated) and audio buffer has drained
+            if self.openai_client:
+                self.logger.info(f"[FunctionCall] Closing OpenAI connection")
+                await self.openai_client.close()
 
             # Get token usage from OpenAI client's last response if available
             token_metrics = {}
@@ -665,12 +696,15 @@ class AudioHookServer:
             except asyncio.TimeoutError:
                 logger.warning(f"[FunctionCall] Timeout waiting for Genesys to acknowledge disconnect for session {self.session_id}")
         except Exception as e:
-            logger.error(f"[FunctionCall] Error in disconnect_session: {e}")
-        finally:
+            logger.error(f"[FunctionCall] Error in disconnect_session: {e}", exc_info=True)
+            # Ensure cleanup happens even on error
             self.running = False
             await self.stop_audio_processing()
             if self.openai_client:
-                await self.openai_client.close()
+                try:
+                    await self.openai_client.close()
+                except Exception:
+                    pass
 
     async def handle_audio_frame(self, frame_bytes: bytes):
         """
