@@ -105,9 +105,10 @@ The connector uses an adaptive audio buffering system to handle long AI response
 
 **How it works:**
 - OpenAI Realtime API sends audio faster than real-time playback speed (per OpenAI documentation)
-- The buffer stores incoming frames while respecting Genesys rate limits (50 frames/sec sustained)
+- The buffer stores incoming frames while respecting Genesys rate limits (10 frames/sec sustained, conservative)
 - This prevents audio truncation during long responses (e.g., detailed ticket information, complex explanations)
 - Memory usage is minimal (~1.92 MB at full capacity)
+- Conservative rate limiting prevents 429 errors and ensures stable connections
 
 **Log messages you may see:**
 - **DEBUG**: Normal operation (buffer < 75%)
@@ -145,17 +146,30 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 #### Step 3: Configure Environment Variables
 
-Add the following environment variables in the app settings:
+**Minimum Mandatory Environment Variables:**
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `OPENAI_API_KEY` | Your OpenAI API key | Yes |
-| `GENESYS_API_KEY` | Shared secret for Genesys authentication | Yes |
-| `OPENAI_MODEL` | Default OpenAI model | No |
-| `OPENAI_VOICE` | Default voice selection | No |
-| `DEBUG` | Set to `false` for production | No |
+These are the **required** environment variables you must set for the integration to work:
 
-**Important**: Mark sensitive variables as encrypted secrets.
+| Variable | Description | Example Value |
+|----------|-------------|---------------|
+| `OPENAI_API_KEY` | Your OpenAI API key | `sk-proj-...` |
+| `OPENAI_MODEL` | OpenAI model to use | `gpt-realtime` (recommended) |
+| `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Your generated API key |
+| `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Your OAuth client ID |
+| `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Your OAuth client secret |
+| `GENESYS_REGION` | Your Genesys Cloud region | `usw2.pure.cloud` |
+
+**Optional Environment Variables:**
+
+| Variable | Description | Default Value |
+|----------|-------------|---------------|
+| `OPENAI_VOICE` | Voice selection for AI responses | `sage` |
+| `DEBUG` | Enable debug logging | `false` |
+
+**Important**: 
+- Mark all sensitive variables (API keys, secrets) as **encrypted secrets** in DigitalOcean
+- `DEBUG` defaults to `false` if not set (production mode)
+- Use `gpt-realtime` as the model for optimal performance and cost
 
 #### Step 4: Deploy
 
