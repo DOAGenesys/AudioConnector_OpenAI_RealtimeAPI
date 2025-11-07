@@ -34,39 +34,6 @@ This application serves as a WebSocket middleware that captures audio from Genes
 - OpenAI API key with Real-Time API access
 - Cloud deployment platform (DigitalOcean recommended)
 
-## Installation
-
-### 1. Clone Repository
-
-```bash
-git clone <your-repository-url>
-cd <your-repository-directory>
-```
-
-### 2. Create Virtual Environment
-
-```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### 3. Requirements
-
-The project pins `websockets` to the 12.x series to ensure compatibility with the server and OpenAI GA WebSocket interface. Install from the provided file:
-
-```bash
-pip install -r requirements.txt
-```
-
 ## Configuration
 
 ### Environment Variables
@@ -164,9 +131,11 @@ Because the entries are passed straight through to OpenAI, you can add new MCP s
 
 ### DigitalOcean App Platform
 
-#### Step 1: Repository Setup
+#### Step 1: DigitalOcean account creation
 
-Push your code to a Git repository (GitHub/GitLab). Include `requirements.txt` but exclude actual secrets from `.env`.
+If you don't have already one, you can get a DigitalOcean account with 200$ in free credits here:
+
+<a href="https://www.digitalocean.com/?refcode=e78e0ec0ec1d&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"><img src="https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%201.svg" alt="DigitalOcean Referral Badge" /></a>
 
 #### Step 2: Create DigitalOcean App
 
