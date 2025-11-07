@@ -91,7 +91,6 @@ OPENAI_VOICE=sage
 DEBUG=true
 
 # Genesys Data Actions (optional)
-ENABLE_GENESYS_DATA_ACTIONS=false
 GENESYS_CLIENT_ID=
 GENESYS_CLIENT_SECRET=
 GENESYS_REGION=
@@ -116,7 +115,6 @@ Set the following variables when you want the voice agent to call Genesys Cloud 
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `ENABLE_GENESYS_DATA_ACTIONS` | Set to `true` to expose Genesys Data Actions to the model. | No |
 | `GENESYS_CLIENT_ID` / `GENESYS_CLIENT_SECRET` | OAuth client credentials with permission to run the desired data actions. | Yes (when enabled) |
 | `GENESYS_REGION` or `GENESYS_BASE_URL` | Region slug (e.g., `usw2.pure.cloud`) or full API base URL. Determines which Genesys org to call. | Yes (when enabled) |
 | `GENESYS_LOGIN_URL` | Optional override for the OAuth login URL. Defaults to `https://login.<region>.mypurecloud.com`. | No |
@@ -219,8 +217,8 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
-| `DATA_ACTION_IDS` | Pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
-| `DATA_ACTION_DESCRIPTIONS` | Pipe separated descriptions of every action, aligned with `DATA_ACTION_IDS` order | Not set |
+| `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
+| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
 | `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
 
 ### Output Variables (Connector → Architect)
@@ -259,7 +257,7 @@ Both functions include straightforward instructions inside the system prompt so 
 
 ### Genesys Data Action Tools
 
-When `ENABLE_GENESYS_DATA_ACTIONS=true` and `DATA_ACTION_IDS` are provided, the server fetches the corresponding input/success schemas from Genesys Cloud and dynamically builds function tools such as `genesys_data_action_get_account`.
+When `DATA_ACTION_IDS` are provided, the server fetches the corresponding input/success schemas from Genesys Cloud and dynamically builds function tools such as `genesys_data_action_get_account`.
 
 - Each tool mirrors the required/optional fields from the data action input schema, keeping the model honest about arguments.
 - Tool output is fed back to the model immediately so it can explain results to the caller in natural language.
