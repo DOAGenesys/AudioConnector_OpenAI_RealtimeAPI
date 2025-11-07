@@ -375,7 +375,7 @@ class OpenAIRealtimeClient:
         async with self._lock:
             # WEBSOCKETS VERSION COMPATIBILITY:
             # Use is_websocket_open() helper for backward compatibility with websockets < 15.0
-            # Fixes Issue #9 from CLAUDE.md - Missing WebSocket State Validation
+            # Fixes Issue #9 from legacy buglog - Missing WebSocket State Validation
             if self.ws and self.running and is_websocket_open(self.ws):
                 try:
                     if DEBUG == 'true':
@@ -390,7 +390,7 @@ class OpenAIRealtimeClient:
                     except websockets.exceptions.WebSocketException as e:
                         if "429" in str(e) and await self.handle_rate_limit():
                             # IMPORTANT: Re-validate websocket state after rate limit handling
-                            # Fixes Issue #2 from CLAUDE.md - Race Condition in _safe_send
+                            # Fixes Issue #2 from legacy buglog - Race Condition in _safe_send
                             # handle_rate_limit() may close websocket, so must verify before retry
                             if self.ws and self.running and is_websocket_open(self.ws):
                                 await self.ws.send(message)
@@ -405,7 +405,7 @@ class OpenAIRealtimeClient:
     async def send_audio(self, pcmu_8k: bytes):
         # WEBSOCKETS VERSION COMPATIBILITY:
         # Use is_websocket_open() for backward compatibility with websockets < 15.0
-        # Fixes Issue #11 from CLAUDE.md - Silent Failure in audio send
+        # Fixes Issue #11 from legacy buglog - Silent Failure in audio send
         # Now logs warning when dropping audio frames instead of silently returning
         if not self.running or self.ws is None or not is_websocket_open(self.ws):
             if DEBUG == 'true' and self.ws is not None:
