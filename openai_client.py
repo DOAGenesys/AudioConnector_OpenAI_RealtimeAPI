@@ -349,7 +349,7 @@ class OpenAIRealtimeClient:
                 while True:
                     msg = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
                     ev = json.loads(msg)
-                    self.logger.debug(f"Received after session.update:\n{format_json(ev)}")
+                    self.logger.info(f"[FunctionCall] Received after session.update:\n{format_json(ev)}")
 
                     if ev.get("type") == "error" and ev.get("code") == 429:
                         if await self.handle_rate_limit():
@@ -706,13 +706,13 @@ class OpenAIRealtimeClient:
         if ev_type.endswith("arguments.delta"):
             delta = event.get("delta", "")
             preview = delta if isinstance(delta, str) else json.dumps(delta)
-            self.logger.debug(f"[MCP] arguments.delta item={item_id} call_id={call_id}: {preview[:256]}")
+            self.logger.info(f"[MCP] arguments.delta item={item_id} call_id={call_id}: {preview[:256]}")
         elif ev_type.endswith("arguments.done"):
             args = event.get("arguments", "")
             preview = args if isinstance(args, str) else json.dumps(args)
             self.logger.info(f"[MCP] arguments.done item={item_id} call_id={call_id}: {preview[:256]}")
         elif ev_type.endswith(".in_progress"):
-            self.logger.debug(f"[MCP] Tool call in progress item={item_id} call_id={call_id}")
+            self.logger.info(f"[MCP] Tool call in progress item={item_id} call_id={call_id}")
         elif ev_type.endswith(".completed"):
             self.logger.info(f"[MCP] Tool call completed item={item_id} call_id={call_id}")
         elif ev_type.endswith(".failed"):
@@ -728,7 +728,7 @@ class OpenAIRealtimeClient:
             message = event.get("error") or event.get("message") or format_json(event)
             self.logger.warning(f"[MCP] mcp.list_tools failed for item={item_id}: {str(message)[:256]}")
         else:
-            self.logger.debug(f"[MCP] mcp.list_tools.{ev_type.split('.')[-1]} item={item_id}")
+            self.logger.info(f"[MCP] mcp.list_tools.{ev_type.split('.')[-1]} item={item_id}")
 
     async def close(self):
         duration = time.time() - self.start_time
