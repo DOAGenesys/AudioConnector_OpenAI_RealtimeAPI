@@ -222,9 +222,15 @@ class GenesysActionsClient:
         self._cache_lock = asyncio.Lock()
 
     async def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        token = await self._oauth.get_token()
+        try:
+            token = await self._oauth.get_token()
+        except Exception as token_err:
+            logger.error(f"[GenesysActions] ERROR: Failed to get OAuth token: {token_err}", exc_info=True)
+            raise GenesysToolError(f"Authentication failed: {str(token_err)}")
+        
         attempt = 0
         url = f"{self._base_url}{path}"
+        last_error = None
 
         while attempt <= GENESYS_HTTP_RETRY_MAX:
             attempt += 1
@@ -239,26 +245,82 @@ class GenesysActionsClient:
                         },
                         json=payload,
                     )
+                
                 if response.status_code == 429:
                     retry_after = float(response.headers.get('Retry-After', '1'))
-                    logger.warning(f"[GenesysActions] Rate limited on {path}. Retrying in {retry_after}s")
+                    logger.warning(
+                        f"[GenesysActions] Rate limited on {method} {path} (attempt {attempt}/{GENESYS_HTTP_RETRY_MAX}). "
+                        f"Retrying in {retry_after}s"
+                    )
                     await asyncio.sleep(retry_after)
                     continue
+                
                 if response.status_code >= 500:
                     backoff = GENESYS_HTTP_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(f"[GenesysActions] Server error {response.status_code} on {path}. Backing off {backoff:.2f}s")
+                    logger.error(
+                        f"[GenesysActions] ERROR: Server error {response.status_code} on {method} {path} "
+                        f"(attempt {attempt}/{GENESYS_HTTP_RETRY_MAX}). Backing off {backoff:.2f}s"
+                    )
                     await asyncio.sleep(backoff)
                     continue
+                
+                if response.status_code >= 400:
+                    try:
+                        error_detail = response.json()
+                    except Exception:
+                        error_detail = response.text
+                    logger.error(
+                        f"[GenesysActions] ERROR: HTTP {response.status_code} on {method} {path}. "
+                        f"Response: {error_detail}"
+                    )
+                
                 response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as exc:
+                
+                try:
+                    return response.json()
+                except json.JSONDecodeError as json_err:
+                    logger.error(
+                        f"[GenesysActions] ERROR: Invalid JSON response from {method} {path}: {json_err}. "
+                        f"Response text: {response.text[:500]}"
+                    )
+                    raise GenesysToolError(f"Invalid JSON response from Genesys API: {str(json_err)}")
+                    
+            except httpx.TimeoutException as timeout_exc:
+                last_error = timeout_exc
+                logger.error(
+                    f"[GenesysActions] ERROR: Timeout on {method} {path} (attempt {attempt}/{GENESYS_HTTP_RETRY_MAX}). "
+                    f"Timeout: {GENESYS_HTTP_TIMEOUT_SECONDS}s"
+                )
                 if attempt > GENESYS_HTTP_RETRY_MAX:
-                    raise GenesysToolError(f"Genesys API request failed: {exc}") from exc
+                    raise GenesysToolError(f"Request timeout after {GENESYS_HTTP_RETRY_MAX} attempts") from timeout_exc
                 backoff = GENESYS_HTTP_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                logger.warning(f"[GenesysActions] HTTP error on {path}: {exc}. Backoff {backoff:.2f}s")
+                await asyncio.sleep(backoff)
+            except httpx.HTTPStatusError as status_exc:
+                last_error = status_exc
+                logger.error(
+                    f"[GenesysActions] ERROR: HTTP status error on {method} {path}: {status_exc}",
+                    exc_info=True
+                )
+                if attempt > GENESYS_HTTP_RETRY_MAX:
+                    raise GenesysToolError(f"HTTP {status_exc.response.status_code}: {str(status_exc)}") from status_exc
+                backoff = GENESYS_HTTP_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                await asyncio.sleep(backoff)
+            except httpx.HTTPError as http_exc:
+                last_error = http_exc
+                logger.error(
+                    f"[GenesysActions] ERROR: HTTP error on {method} {path} (attempt {attempt}/{GENESYS_HTTP_RETRY_MAX}): {http_exc}",
+                    exc_info=True
+                )
+                if attempt > GENESYS_HTTP_RETRY_MAX:
+                    raise GenesysToolError(f"Genesys API request failed: {str(http_exc)}") from http_exc
+                backoff = GENESYS_HTTP_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
                 await asyncio.sleep(backoff)
 
-        raise GenesysToolError(f"Genesys API request exhausted retries for {path}")
+        error_msg = f"Genesys API request exhausted {GENESYS_HTTP_RETRY_MAX} retries for {method} {path}"
+        if last_error:
+            error_msg += f". Last error: {str(last_error)}"
+        logger.error(f"[GenesysActions] CRITICAL ERROR: {error_msg}")
+        raise GenesysToolError(error_msg)
 
     async def _get_schema(self, action_id: str, schema_type: str) -> Dict[str, Any]:
         cache_key = (action_id, schema_type)
@@ -414,27 +476,108 @@ async def build_genesys_tool_context(session_logger, input_variables: Dict[str, 
         tool_summaries.append((tool_name, action_id, param_keys))
 
         async def handler(args: Dict[str, Any], *, _action_id=action_id, _success_schema=success_schema) -> Dict[str, Any]:
-            if invocation_counter['count'] >= GENESYS_MAX_ACTION_CALLS_PER_SESSION:
-                raise GenesysToolError("Maximum Genesys data action invocations exceeded for this session")
-            if not isinstance(args, dict):
-                raise GenesysToolError("Tool arguments must be a JSON object")
-            payload_bytes = len(json.dumps(args).encode('utf-8'))
-            if payload_bytes > GENESYS_MAX_TOOL_ARGUMENT_BYTES:
-                raise GenesysToolError("Tool arguments payload is too large")
-            invocation_counter['count'] += 1
-            session_logger.info(
-                "[GenesysTools] Executing data action %s (call #%s)",
-                _action_id,
-                invocation_counter['count']
-            )
-            result_payload = await GENESYS_ACTIONS_CLIENT.execute(_action_id, args)
-            redacted = _redact_payload(result_payload)
-            return {
-                "status": "ok",
-                "action_id": _action_id,
-                "result": redacted,
-                "schema": _success_schema
-            }
+            try:
+                if invocation_counter['count'] >= GENESYS_MAX_ACTION_CALLS_PER_SESSION:
+                    session_logger.error(
+                        "[GenesysTools] ERROR: Maximum invocations (%s) exceeded for session",
+                        GENESYS_MAX_ACTION_CALLS_PER_SESSION
+                    )
+                    raise GenesysToolError("Maximum Genesys data action invocations exceeded for this session")
+                
+                if not isinstance(args, dict):
+                    session_logger.error(
+                        "[GenesysTools] ERROR: Invalid argument type for action %s: expected dict, got %s",
+                        _action_id,
+                        type(args).__name__
+                    )
+                    raise GenesysToolError("Tool arguments must be a JSON object")
+                
+                try:
+                    args_json_str = json.dumps(args)
+                    payload_bytes = len(args_json_str.encode('utf-8'))
+                except (TypeError, ValueError) as json_err:
+                    session_logger.error(
+                        "[GenesysTools] ERROR: Failed to serialize arguments for action %s: %s",
+                        _action_id,
+                        json_err,
+                        exc_info=True
+                    )
+                    raise GenesysToolError(f"Failed to serialize tool arguments: {str(json_err)}")
+                
+                if payload_bytes > GENESYS_MAX_TOOL_ARGUMENT_BYTES:
+                    session_logger.error(
+                        "[GenesysTools] ERROR: Arguments too large for action %s: %s bytes (max: %s)",
+                        _action_id,
+                        payload_bytes,
+                        GENESYS_MAX_TOOL_ARGUMENT_BYTES
+                    )
+                    raise GenesysToolError("Tool arguments payload is too large")
+                
+                invocation_counter['count'] += 1
+                session_logger.info(
+                    "[GenesysTools] Executing data action %s (call #%s) with %s bytes of arguments",
+                    _action_id,
+                    invocation_counter['count'],
+                    payload_bytes
+                )
+                
+                try:
+                    result_payload = await GENESYS_ACTIONS_CLIENT.execute(_action_id, args)
+                except GenesysToolError as api_err:
+                    session_logger.error(
+                        "[GenesysTools] ERROR: API error executing action %s: %s",
+                        _action_id,
+                        api_err,
+                        exc_info=True
+                    )
+                    raise
+                except Exception as exec_err:
+                    session_logger.error(
+                        "[GenesysTools] ERROR: Unexpected error executing action %s: %s",
+                        _action_id,
+                        exec_err,
+                        exc_info=True
+                    )
+                    raise GenesysToolError(f"Failed to execute data action: {str(exec_err)}")
+                
+                if result_payload is None:
+                    session_logger.warning(
+                        "[GenesysTools] WARNING: Action %s returned None, treating as empty result",
+                        _action_id
+                    )
+                    result_payload = {}
+                
+                try:
+                    redacted = _redact_payload(result_payload)
+                except Exception as redact_err:
+                    session_logger.warning(
+                        "[GenesysTools] WARNING: Redaction failed for action %s: %s. Using original payload.",
+                        _action_id,
+                        redact_err
+                    )
+                    redacted = result_payload
+                
+                session_logger.info(
+                    "[GenesysTools] Successfully executed action %s",
+                    _action_id
+                )
+                
+                return {
+                    "status": "ok",
+                    "action_id": _action_id,
+                    "result": redacted,
+                    "schema": _success_schema
+                }
+            except GenesysToolError:
+                raise
+            except Exception as unexpected_err:
+                session_logger.error(
+                    "[GenesysTools] CRITICAL ERROR: Unexpected exception in handler for action %s: %s",
+                    _action_id,
+                    unexpected_err,
+                    exc_info=True
+                )
+                raise GenesysToolError(f"Internal error in tool handler: {str(unexpected_err)}")
 
         handlers[tool_name] = handler
 
