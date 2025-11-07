@@ -27,7 +27,12 @@ if not GENESYS_API_KEY:
 
 
 # Audio buffering settings
-MAX_AUDIO_BUFFER_SIZE = 50
+# Increased buffer size to support long responses from OpenAI Realtime API
+# OpenAI sends audio faster than realtime, so we need a large buffer
+# 400 frames @ ~0.15s/frame = ~60 seconds of audio buffered
+MAX_AUDIO_BUFFER_SIZE = 400
+AUDIO_BUFFER_WARNING_THRESHOLD_HIGH = 0.90
+AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 
 # Server settings
 GENESYS_PATH = "/audiohook"
@@ -135,10 +140,10 @@ RATE_LIMIT_PHASES = [
 ]
 
 # Genesys rate limiting constants (to respect Audio Hook limits)
-GENESYS_MSG_RATE_LIMIT = 5
-GENESYS_BINARY_RATE_LIMIT = 5
-GENESYS_MSG_BURST_LIMIT = 25
-GENESYS_BINARY_BURST_LIMIT = 25
+GENESYS_MSG_RATE_LIMIT = 10
+GENESYS_BINARY_RATE_LIMIT = 50
+GENESYS_MSG_BURST_LIMIT = 50
+GENESYS_BINARY_BURST_LIMIT = 150
 GENESYS_RATE_WINDOW = 1.0
 
 LOG_FILE = "logging.txt"
