@@ -23,9 +23,10 @@ This application serves as a WebSocket middleware that captures audio from Genes
 2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format
 3. **AI Processing**: Audio forwarded to OpenAI Real-Time API using specified model (e.g., gpt-realtime-mini)
 4. **Response Generation**: OpenAI processes audio and generates synthesized voice response
-5. **Autonomous Call Management**: AI uses function calling to autonomously end calls when users indicate completion or request human escalation
-6. **Audio Playback**: Synthesized audio streams back through Genesys to caller
-7. **Session Termination**: Final conversation summary generated and sent to Genesys before connection closure
+5. **Audio Playback**: Synthesized audio streams back through Genesys to caller
+6. **Autonomous Call Management**: When appropriate, AI invokes call-control functions (`end_conversation_successfully` or `end_conversation_with_escalation`) and generates a farewell message
+7. **Graceful Disconnect**: After farewell audio completes and buffer drains, connector sends disconnect message to Genesys with session outcome data (escalation status, completion summary, token metrics)
+8. **Architect Flow Routing**: Architect uses output variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`) to route the call appropriately (queue transfer, wrap-up, etc.)
 
 ## Prerequisites
 
@@ -232,12 +233,12 @@ The middleware now exposes both call-control functions and optional Genesys Clou
 ### Call-Control Functions
 
 #### `end_conversation_successfully`
-Triggered when the caller confirms their request is complete. The model sends a short `summary` describing what was accomplished and the server gracefully disconnects the AudioHook session after the agent delivers a closing line.
+Triggered when the caller confirms their request is complete. The model sends a short `summary` describing what was accomplished. The function result is fed back to OpenAI, which then generates a natural farewell message to the caller. Once this farewell audio completes playing, the connector waits for the audio buffer to fully drain (ensuring the caller hears the entire goodbye), then gracefully disconnects the AudioHook session with `ESCALATION_REQUIRED=false` and `COMPLETION_SUMMARY` containing the provided summary.
 
 #### `end_conversation_with_escalation`
-Triggered when the caller asks for a human, becomes frustrated, or the task cannot continue. The model passes a `reason`, we log it, and the connector returns `ESCALATION_REQUIRED=true` plus the reason so Architect can branch into a transfer queue.
+Triggered when the caller explicitly requests a human agent, shows frustration, or the task cannot be completed. The model passes a `reason` explaining why escalation is needed. The function result is sent back to OpenAI, which generates an appropriate transition message (e.g., "I'll connect you with an agent who can help"). After this message plays completely, the connector disconnects the AudioHook session with `ESCALATION_REQUIRED=true` and `ESCALATION_REASON` populated, allowing Architect to branch into a transfer queue or escalation flow.
 
-Both functions include straightforward instructions inside the system prompt so the model knows exactly when to call them.
+Both functions include clear instructions in the system prompt so the model knows exactly when to invoke them. The connector ensures all farewell audio is delivered to the caller before disconnecting, providing a smooth conversational conclusion.
 
 ### Genesys Data Action Tools
 
@@ -320,10 +321,14 @@ DATA_ACTION_DESCRIPTIONS = Searches knowledge base articles to address general F
 
 ### How It Works
 
-1. **Function Detection** – OpenAI Realtime decides whether to call a Genesys data action or a call-control function.
-2. **Secure Execution** – The middleware validates arguments, enforces rate limits, executes the Genesys API call, and returns sanitized JSON results to the model.
-3. **Graceful Termination** – When a call-control function fires, the agent plays a brief acknowledgment before the connector issues the appropriate AudioHook `disconnect` with enriched output variables.
-4. **Architect Integration** – Architect can branch on `ESCALATION_REQUIRED`, `ESCALATION_REASON`, or `COMPLETION_SUMMARY`, while still receiving the usual conversation summary and token metrics.
+1. **Function Detection** – OpenAI Realtime decides whether to call a Genesys data action or a call-control function based on the conversation context.
+2. **Secure Execution** – The middleware validates arguments, enforces rate limits, executes the Genesys API call (for data actions), and returns sanitized JSON results to the model.
+3. **Graceful Termination** – When a call-control function fires:
+   - Function result is sent back to OpenAI
+   - OpenAI generates a natural farewell or transition message
+   - Audio buffer drains completely, ensuring caller hears the full message
+   - Connector issues AudioHook `disconnect` with enriched output variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`)
+4. **Architect Integration** – Architect can branch on `ESCALATION_REQUIRED`, `ESCALATION_REASON`, or `COMPLETION_SUMMARY` to route calls to queues, wrap-up flows, or closure paths, while still receiving conversation summaries and token metrics.
 
 ### Integration Benefits
 
