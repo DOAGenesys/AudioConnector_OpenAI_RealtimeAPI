@@ -181,7 +181,7 @@ These are the **required** environment variables you must set for the integratio
 
 Create an inbound call flow with the Call Audio Connector action referencing your integration. Example:
 
-<img width="1389" height="1076" alt="image" src="https://github.com/user-attachments/assets/7c57d40a-81f0-4afc-b5ee-ed12996a886f" />
+<img width="447" height="870" alt="image" src="https://github.com/user-attachments/assets/c32f9173-2459-4b3d-8851-a78dfadf30a0" />
 
 You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v8-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` and `Genesys Data Action Tools` sections below), which will determine agentic tool usage. Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
 
