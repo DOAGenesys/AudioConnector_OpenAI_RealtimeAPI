@@ -8,7 +8,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import httpx
 
 from config import (
-    ENABLE_GENESYS_DATA_ACTIONS,
     GENESYS_ALLOWED_DATA_ACTION_IDS,
     GENESYS_BASE_URL,
     GENESYS_CLIENT_ID,
@@ -70,6 +69,14 @@ def _normalize_parameters_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         "type": "object",
         "properties": (schema or {}).get("properties", {}) or {}
     }
+
+    # Remove potentially problematic fields that could conflict with OpenAI's expectations
+    base.pop("title", None)
+    base.pop("$schema", None)
+    
+    # Ensure additionalProperties is set to false for consistency with OpenAI Realtime API
+    # This prevents issues where Genesys schemas might have additionalProperties: true
+    base["additionalProperties"] = False
 
     if not GENESYS_TOOLS_STRICT_MODE:
         return base
@@ -327,11 +334,8 @@ def _build_instruction_text(tool_summaries: List[Tuple[str, str, List[str]]]) ->
 
 
 async def build_genesys_tool_context(session_logger, input_variables: Dict[str, Any]) -> Optional[GenesysToolContext]:
-    if not ENABLE_GENESYS_DATA_ACTIONS:
-        return None
-
     if not GENESYS_CLIENT_ID or not GENESYS_CLIENT_SECRET:
-        session_logger.error("[GenesysTools] ENABLE_GENESYS_DATA_ACTIONS is true but Genesys client credentials are missing")
+        session_logger.error("[GenesysTools] Genesys client credentials are missing")
         return None
 
     raw_ids = input_variables.get("DATA_ACTION_IDS") or input_variables.get("GENESYS_DATA_ACTION_IDS")
