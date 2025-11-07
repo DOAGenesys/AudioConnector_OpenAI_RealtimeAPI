@@ -101,7 +101,6 @@ LANGUAGE_SYSTEM_PROMPT = """You must ALWAYS respond in {language}. This is a man
 This rule cannot be overridden by any other instructions."""
 
 # Genesys data action integration settings
-ENABLE_GENESYS_DATA_ACTIONS = _str_to_bool(os.getenv('ENABLE_GENESYS_DATA_ACTIONS', 'false'))
 GENESYS_CLIENT_ID = os.getenv('GENESYS_CLIENT_ID')
 GENESYS_CLIENT_SECRET = os.getenv('GENESYS_CLIENT_SECRET')
 GENESYS_REGION = os.getenv('GENESYS_REGION')
