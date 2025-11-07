@@ -558,14 +558,14 @@ class OpenAIRealtimeClient:
                                     self._await_disconnect_on_done = False
                                     self._disconnect_context = None
                                     try:
-                                        if ctx.get("action") == "end_call":
+                                        if ctx.get("action") == "end_conversation_successfully":
                                             if callable(self.on_end_call_request):
                                                 await self.on_end_call_request(ctx.get("reason", "completed"), ctx.get("info", ""))
-                                        elif ctx.get("action") == "handoff_to_human":
+                                        elif ctx.get("action") == "end_conversation_with_escalation":
                                             if callable(self.on_handoff_request):
-                                                await self.on_handoff_request("transfer", ctx.get("info", "handoff_to_human"))
+                                                await self.on_handoff_request("transfer", ctx.get("info", ""))
                                             elif callable(self.on_end_call_request):
-                                                await self.on_end_call_request("transfer", ctx.get("info", "handoff_to_human"))
+                                                await self.on_end_call_request("transfer", ctx.get("info", ""))
                                     except Exception as e:
                                         self.logger.error(f"[FunctionCall] ERROR: Exception invoking disconnect callback: {e}", exc_info=True)
                                     try:
