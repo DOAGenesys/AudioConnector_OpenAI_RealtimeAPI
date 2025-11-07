@@ -232,7 +232,7 @@ These variables are returned when the session ends:
 
 Note: there are some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
 
-## Function Calling for Autonomous Call Management
+## Function Calling
 
 The middleware now exposes both call-control functions and optional Genesys Cloud Data Action tools to the OpenAI Realtime model. This lets the voice agent terminate calls, escalate to humans, or fetch real customer data without bespoke IVR logic.
 
