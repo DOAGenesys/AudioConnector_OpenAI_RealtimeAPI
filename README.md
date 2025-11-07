@@ -131,12 +131,11 @@ Advanced tuning variables (`GENESYS_HTTP_TIMEOUT_SECONDS`, retry/backoff knobs, 
 
 The connector can also expose remote [Model Context Protocol (MCP)](https://platform.openai.com/docs/guides/tools-remote-mcp) servers and OpenAI built-in tools to the Realtime session so the voice agent can call them directly.
 
-1. Set `ENABLE_MCP_TOOLS=true`.
-2. Provide the tool list with either `MCP_TOOLS_JSON='[ ... ]'` or `MCP_SERVERS_CONFIG_PATH=docs/mcp_config.json`. The file must contain a JSON array of tool objects that follow OpenAI's Realtime spec (for example, `{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.deepwiki.com/mcp","require_approval":"never"}` or `{"type":"web_search_preview"}`).
-3. On session start we load the list once, append clear guidance to the system instructions (reminding the model to use `mcp.list_tools`/`mcp_call` events), and register the tools alongside the default call‑control and Genesys Data Action functions.
-4. The OpenAI client now emits structured logs for every `response.mcp_call*` and `mcp_list_tools*` event so MCP activity can be monitored in production.
+1. In Architect, set the **`MCP_TOOLS_JSON` input variable** to a JSON array string. Each entry must follow the OpenAI Realtime spec (e.g., `{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.deepwiki.com/mcp","require_approval":"never"}` or `{ "type": "web_search_preview" }`). Leave the variable blank to disable MCP for that call.
+2. On session start we parse that string, append clear guidance to the system instructions (reminding the model to use `mcp.list_tools`/`mcp_call` events), and register the tools alongside the default call-control and Genesys Data Action functions.
+3. The OpenAI client emits structured logs for every `response.mcp_call*` and `mcp_list_tools*` event so MCP activity can be monitored in production.
 
-Because the entries are passed straight through to OpenAI, you can add new MCP servers or built-in tools without code changes—just update the JSON blob or file referenced by the environment variables above and redeploy.
+Because the entries are passed straight through to OpenAI, you can add new MCP servers or built-in tools without code changes—just update the Architect variable and redeploy your flow if needed.
 
 ## Deployment
 
@@ -222,6 +221,7 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
 | `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
+| `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
 
 ### Output Variables (Connector → Architect)
 
