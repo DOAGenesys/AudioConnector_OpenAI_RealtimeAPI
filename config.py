@@ -29,8 +29,9 @@ if not GENESYS_API_KEY:
 # Audio buffering settings
 # Increased buffer size to support long responses from OpenAI Realtime API
 # OpenAI sends audio faster than realtime, so we need a large buffer
-# 400 frames @ ~0.15s/frame = ~60 seconds of audio buffered
-MAX_AUDIO_BUFFER_SIZE = 400
+# 1200 frames @ ~0.15s/frame = ~180 seconds (3 minutes) of audio buffered
+# Memory usage: ~1200 frames × 1600 bytes avg = ~1.92 MB (negligible)
+MAX_AUDIO_BUFFER_SIZE = 1200
 AUDIO_BUFFER_WARNING_THRESHOLD_HIGH = 0.90
 AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 
