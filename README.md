@@ -210,7 +210,7 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
-| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
+| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order. Vital for good tool usage performance | Not set |
 
 ### Output Variables (Connector → Architect)
 
