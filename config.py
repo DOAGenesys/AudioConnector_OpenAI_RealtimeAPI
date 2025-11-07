@@ -28,7 +28,7 @@ if not GENESYS_API_KEY:
 
 # Audio buffering settings
 MAX_AUDIO_BUFFER_SIZE = 50
-AUDIO_FRAME_SEND_INTERVAL = 0.15
+AUDIO_SAMPLE_RATE = 8000
 
 # Server settings
 GENESYS_PATH = "/audiohook"
