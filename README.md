@@ -11,6 +11,7 @@ This application serves as a WebSocket middleware that captures audio from Genes
 - **Real-Time Speech Processing**: Direct speech-to-speech communication using OpenAI's Real-Time API without traditional STT/TTS pipeline
 - **Dynamic AI Configuration**: Customize AI behavior through Genesys Architect variables (system prompt, model, voice, temperature)
 - **Intelligent Conversation Management**: Context-aware responses with built-in Voice Activity Detection (VAD) for natural conversation flow
+- **Long Response Support**: Adaptive audio buffering handles 3-minute continuous AI responses without truncation—perfect for detailed explanations, complex lookups, and multi-step function calls
 - **Autonomous Call Termination**: AI can autonomously end calls when users indicate they're done or request human escalation using OpenAI function calling
 - **Genesys Data Actions**: Dynamically expose approved Genesys Cloud Data Actions as OpenAI tools so the voice agent can run secure CRM/data lookups in real time
 - **Robust Error Handling**: Rate limiting and exponential backoff for stable API interaction
@@ -124,6 +125,30 @@ Set the following variables when you want the voice agent to call Genesys Cloud 
 | `GENESYS_TOOL_OUTPUT_REDACTION_FIELDS` | Comma-separated JSON paths (e.g., `customer.ssn,account.cardNumber`) that are redacted before returning tool output to the model. | No |
 
 Advanced tuning variables (`GENESYS_HTTP_TIMEOUT_SECONDS`, retry/backoff knobs, etc.) are also available in `config.py` for production hardening.
+
+#### Audio Buffering Configuration
+
+The connector uses an adaptive audio buffering system to handle long AI responses without truncation:
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `MAX_AUDIO_BUFFER_SIZE` | 1200 frames | Supports ~180 seconds (3 minutes) of continuous audio buffering |
+| `AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM` | 75% | Logs INFO when buffer usage exceeds 75% |
+| `AUDIO_BUFFER_WARNING_THRESHOLD_HIGH` | 90% | Logs WARNING when buffer usage exceeds 90% |
+
+**How it works:**
+- OpenAI Realtime API sends audio faster than real-time playback speed (per OpenAI documentation)
+- The buffer stores incoming frames while respecting Genesys rate limits (50 frames/sec sustained)
+- This prevents audio truncation during long responses (e.g., detailed ticket information, complex explanations)
+- Memory usage is minimal (~1.92 MB at full capacity)
+
+**Log messages you may see:**
+- **DEBUG**: Normal operation (buffer < 75%)
+- **INFO**: Elevated usage, likely a longer response in progress (buffer 75-90%)
+- **WARNING**: High usage, extended response (buffer 90%+)
+- **ERROR**: Buffer full with dropped frame (should be extremely rare; indicates need for larger buffer)
+
+No configuration required—the system automatically handles responses of any length up to 3 minutes.
 
 #### Remote MCP Tooling
 
