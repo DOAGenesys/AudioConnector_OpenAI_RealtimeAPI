@@ -36,6 +36,8 @@ def _derive_api_base_url() -> str:
     if GENESYS_BASE_URL:
         return GENESYS_BASE_URL.rstrip('/')
     if GENESYS_REGION:
+        if 'mypurecloud.com' in GENESYS_REGION or 'mypurecloud.de' in GENESYS_REGION:
+            return f"https://api.{GENESYS_REGION}"
         return f"https://api.{GENESYS_REGION}.mypurecloud.com"
     return "https://api.mypurecloud.com"
 
@@ -44,6 +46,8 @@ def _derive_login_url() -> str:
     if GENESYS_LOGIN_URL:
         return GENESYS_LOGIN_URL.rstrip('/')
     if GENESYS_REGION:
+        if 'mypurecloud.com' in GENESYS_REGION or 'mypurecloud.de' in GENESYS_REGION:
+            return f"https://login.{GENESYS_REGION}"
         return f"https://login.{GENESYS_REGION}.mypurecloud.com"
     return "https://login.mypurecloud.com"
 
@@ -86,7 +90,9 @@ def _normalize_parameters_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
             copy["items"] = enforce(copy["items"])
         return copy
 
-    return enforce(base)
+    enforced = enforce(base)
+    enforced["strict"] = True
+    return enforced
 
 
 def _build_tool_description(action_id: str, schema: Dict[str, Any], custom: Optional[str]) -> str:
@@ -390,8 +396,7 @@ async def build_genesys_tool_context(session_logger, input_variables: Dict[str, 
             "type": "function",
             "name": tool_name,
             "description": description,
-            "parameters": parameters,
-            "strict": GENESYS_TOOLS_STRICT_MODE
+            "parameters": parameters
         }
         tools.append(tool_def)
         param_keys = list(parameters.get("properties", {}).keys())
