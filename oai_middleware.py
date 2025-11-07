@@ -3,7 +3,7 @@ import json
 import uuid
 import logging
 import websockets
-from websockets.http import Response
+from websockets.asyncio.server import Response
 import http
 import os
 
