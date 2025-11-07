@@ -15,7 +15,7 @@ from config import (
     DEFAULT_AGENT_NAME,
     DEFAULT_COMPANY_NAME,
     DEFAULT_MAX_OUTPUT_TOKENS,
-    AUDIO_FRAME_SEND_INTERVAL,
+    AUDIO_SAMPLE_RATE,
     MAX_AUDIO_BUFFER_SIZE,
     ENDING_PROMPT,
     ENDING_TEMPERATURE
@@ -114,15 +114,20 @@ class AudioHookServer:
             while self.running:
                 if self.audio_buffer:
                     now = time.time()
-                    if now - self.last_frame_time >= AUDIO_FRAME_SEND_INTERVAL:
+                    frame_data = self.audio_buffer[0]
+                    frame_bytes = frame_data['data']
+                    frame_duration = frame_data['duration']
+                    
+                    if now - self.last_frame_time >= frame_duration:
                         if await self.binary_limiter.acquire():
-                            frame = self.audio_buffer.popleft()
+                            self.audio_buffer.popleft()
                             try:
-                                await self.ws.send(frame)
+                                await self.ws.send(frame_bytes)
                                 self.audio_frames_sent += 1
                                 self.last_frame_time = now
                                 self.logger.debug(
-                                    f"Sent audio frame from buffer: {len(frame)} bytes "
+                                    f"Sent audio frame from buffer: {len(frame_bytes)} bytes "
+                                    f"({frame_duration*1000:.1f}ms duration) "
                                     f"(frame #{self.audio_frames_sent}, buffer size: {len(self.audio_buffer)})"
                                 )
                             except websockets.ConnectionClosed:
@@ -130,7 +135,7 @@ class AudioHookServer:
                                 self.running = False
                                 break
                         else:
-                            await asyncio.sleep(AUDIO_FRAME_SEND_INTERVAL)
+                            await asyncio.sleep(frame_duration / 2)
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             self.logger.info("Audio processing task cancelled")
@@ -488,9 +493,15 @@ class AudioHookServer:
 
     async def send_binary_to_genesys(self, data: bytes):
         if len(self.audio_buffer) < MAX_AUDIO_BUFFER_SIZE:
-            self.audio_buffer.append(data)
+            frame_duration = len(data) / AUDIO_SAMPLE_RATE
+            frame_data = {
+                'data': data,
+                'duration': frame_duration
+            }
+            self.audio_buffer.append(frame_data)
             self.logger.debug(
                 f"Buffered audio frame: {len(data)} bytes "
+                f"({frame_duration*1000:.1f}ms duration) "
                 f"(buffer size: {len(self.audio_buffer)})"
             )
         else:
