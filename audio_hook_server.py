@@ -24,6 +24,7 @@ from config import (
 from rate_limiter import RateLimiter
 from openai_client import OpenAIRealtimeClient
 from utils import format_json, parse_iso8601_duration
+from genesys_actions import build_genesys_tool_context
 
 from collections import deque
 
@@ -59,6 +60,12 @@ class AudioHookServer:
         self.audio_buffer = deque(maxlen=MAX_AUDIO_BUFFER_SIZE)
         self.audio_process_task = None
         self.last_frame_time = 0
+        self.genesys_tool_context = None
+        self.session_outcome = {
+            "escalation_required": False,
+            "escalation_reason": "",
+            "completion_summary": ""
+        }
 
         self.logger.info(f"New session started: {self.session_id}")
 
@@ -349,6 +356,18 @@ class AudioHookServer:
         company_name = next((value for key, value in input_vars.items()
                             if key.strip() == "COMPANY_NAME"), DEFAULT_COMPANY_NAME)
 
+        try:
+            self.genesys_tool_context = await build_genesys_tool_context(self.logger, input_vars)
+        except Exception as exc:
+            self.logger.error(f"[GenesysTools] Failed to prepare data action tools: {exc}")
+            self.genesys_tool_context = None
+        tool_definitions = None
+        tool_instructions = None
+        if self.genesys_tool_context:
+            tool_definitions = self.genesys_tool_context.tools
+            tool_instructions = self.genesys_tool_context.instructions
+            self.logger.info(f"[FunctionCall] Enabled {len(tool_definitions)} Genesys data action tools for this session")
+
         self.logger.info(f"Using voice: {voice}")
         self.logger.debug(f"Using instructions: {instructions}")
         if temperature:
@@ -384,6 +403,8 @@ class AudioHookServer:
             self.openai_client.on_end_call_request = self._on_end_call_request
             self.openai_client.on_handoff_request = self._on_handoff_request
             self.logger.info("[FunctionCall] OpenAI callbacks wired: on_end_call_request and on_handoff_request")
+            if self.genesys_tool_context:
+                self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
             await self.openai_client.connect(
                 instructions=instructions,
                 voice=voice,
@@ -391,7 +412,9 @@ class AudioHookServer:
                 model=model,
                 max_output_tokens=max_output_tokens,
                 agent_name=agent_name,
-                company_name=company_name
+                company_name=company_name,
+                tool_definitions=tool_definitions,
+                tool_instructions=tool_instructions
             )
         except Exception as e:
             self.logger.error(f"OpenAI connection failed: {e}")
@@ -406,12 +429,22 @@ class AudioHookServer:
 
     async def _on_end_call_request(self, reason: str, info: str):
         self.logger.info(f"[FunctionCall] OpenAI requested end_call. reason={reason}, info={info}")
-        # Ensure we request a graceful Genesys disconnect
+        summary_text = info or reason or "Call completed"
+        self.session_outcome.update({
+            "escalation_required": False,
+            "escalation_reason": "",
+            "completion_summary": summary_text
+        })
         await self.disconnect_session(reason=reason or "completed", info=info or "")
 
     async def _on_handoff_request(self, reason: str, info: str):
         self.logger.info(f"[FunctionCall] OpenAI requested handoff_to_human. reason={reason}, info={info}")
-        # Use a distinct reason for Architect branching, e.g., "transfer"
+        escalation_reason = info or reason or "handoff_to_human"
+        self.session_outcome.update({
+            "escalation_required": True,
+            "escalation_reason": escalation_reason,
+            "completion_summary": ""
+        })
         await self.disconnect_session(reason=reason or "transfer", info=info or "handoff_to_human")
 
     async def handle_speech_started(self):
@@ -576,6 +609,12 @@ class AudioHookServer:
                 "CONVERSATION_DURATION": str(time.time() - self.start_time),
                 **token_metrics
             }
+            outcome = self.session_outcome or {}
+            output_vars.update({
+                "ESCALATION_REQUIRED": "true" if outcome.get("escalation_required") else "false",
+                "ESCALATION_REASON": outcome.get("escalation_reason", ""),
+                "COMPLETION_SUMMARY": outcome.get("completion_summary", "")
+            })
 
             disconnect_msg = {
                 "version": "2",
