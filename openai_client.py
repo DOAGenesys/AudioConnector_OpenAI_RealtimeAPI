@@ -3,6 +3,8 @@ import asyncio
 import json
 import time
 import base64
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
 import websockets
 
 from config import (
@@ -17,6 +19,56 @@ from config import (
     GENESYS_RATE_WINDOW
 )
 from utils import format_json, create_final_system_prompt, is_websocket_open, get_websocket_connect_kwargs
+
+
+TERMINATION_GUIDANCE = """[CALL CONTROL]
+Call `end_conversation_successfully` when the caller's request has been resolved. Use the `summary` field to explain what was accomplished.
+Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
+Always invoke the correct call-control tool as soon as the user's intent is clear. After confirming, deliver a short verbal acknowledgment."""
+
+
+def _default_call_control_tools() -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "name": "end_conversation_successfully",
+            "description": (
+                "Gracefully end the phone call when the caller confirms their needs are met. "
+                "Provide a short summary of the completed task in the `summary` field."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "One-sentence summary of what was accomplished before ending the call."
+                    }
+                },
+                "required": ["summary"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "end_conversation_with_escalation",
+            "description": (
+                "End the phone call and request a warm transfer to a human agent when the caller asks for a person, is dissatisfied, or the task cannot be completed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Why escalation is needed (e.g., customer requested human, policy restriction, unable to authenticate)."
+                    }
+                },
+                "required": ["reason"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    ]
 
 class OpenAIRealtimeClient:
     def __init__(self, session_id: str, on_speech_started_callback=None):
@@ -42,6 +94,10 @@ class OpenAIRealtimeClient:
         self.on_handoff_request = None
         self._await_disconnect_on_done = False
         self._disconnect_context = None
+        self.custom_tool_definitions: List[Dict[str, Any]] = []
+        self.tool_instruction_text: Optional[str] = None
+        self.custom_tool_choice: Optional[Any] = None
+        self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
 
     async def terminate_session(self, reason="completed", final_message=None):
         try:
@@ -121,7 +177,19 @@ class OpenAIRealtimeClient:
         self.last_retry_time = time.time()
         return True
 
-    async def connect(self, instructions=None, voice=None, temperature=None, model=None, max_output_tokens=None, agent_name=None, company_name=None):
+    async def connect(
+        self,
+        instructions=None,
+        voice=None,
+        temperature=None,
+        model=None,
+        max_output_tokens=None,
+        agent_name=None,
+        company_name=None,
+        tool_definitions: Optional[List[Dict[str, Any]]] = None,
+        tool_instructions: Optional[str] = None,
+        tool_choice: Optional[Any] = None
+    ):
         self.admin_instructions = instructions
 
         customer_data = getattr(self, 'customer_data', None)
@@ -129,6 +197,9 @@ class OpenAIRealtimeClient:
 
         self.agent_name = agent_name
         self.company_name = company_name
+        self.custom_tool_definitions = tool_definitions or []
+        self.tool_instruction_text = tool_instructions
+        self.custom_tool_choice = tool_choice
 
         self.final_instructions = create_final_system_prompt(
             self.admin_instructions,
@@ -210,40 +281,25 @@ class OpenAIRealtimeClient:
                     await self.close()
                     raise RuntimeError("OpenAI session not created")
 
+                instructions_text = self.final_instructions
+                extra_blocks = [TERMINATION_GUIDANCE]
+                if self.tool_instruction_text:
+                    extra_blocks.append(self.tool_instruction_text)
+                instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
+
+                tools = _default_call_control_tools()
+                if self.custom_tool_definitions:
+                    tools.extend(self.custom_tool_definitions)
+
                 session_update = {
                     "type": "session.update",
                     "session": {
                         "type": "realtime",
                         "model": self.model,
-                        "instructions": self.final_instructions,
+                        "instructions": instructions_text,
                         "output_modalities": ["audio"],
-                        "tools": [
-                            {
-                                "type": "function",
-                                "name": "end_call",
-                                "description": "End the phone call when the user's request is complete or they say they are done.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "reason": {"type": "string", "description": "Short reason for ending the call"},
-                                        "note": {"type": "string", "description": "Optional additional notes"}
-                                    }
-                                }
-                            },
-                            {
-                                "type": "function",
-                                "name": "handoff_to_human",
-                                "description": "Escalate the call to a human agent when requested by the caller.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "reason": {"type": "string", "description": "Why the caller wants a human"},
-                                        "department": {"type": "string", "description": "Target department or queue"}
-                                    }
-                                }
-                            }
-                        ],
-                        "tool_choice": "auto",
+                        "tools": tools,
+                        "tool_choice": self.custom_tool_choice or "auto",
                         "audio": {
                             "input": {
                                 "format": {
@@ -481,25 +537,30 @@ class OpenAIRealtimeClient:
     async def _handle_function_call(self, name: str, call_id: str, args: dict):
         try:
             self.logger.info(f"[FunctionCall] Handling function call: name={name}, call_id={call_id}")
+            if name in self.genesys_tool_handlers:
+                await self._handle_genesys_tool_call(name, call_id, args or {})
+                return
+
             output_payload = {}
             action = None
             info = None
-            if name == "end_call":
-                action = "end_call"
-                reason = (args or {}).get("reason") or "User indicated conversation is complete"
-                info = (args or {}).get("note") or reason
-                output_payload = {"result": "ok", "action": action, "reason": reason}
-                # Schedule disconnect after model generates a short closing
+            closing_instruction = None
+            if name in ("end_call", "end_conversation_successfully"):
+                action = "end_conversation_successfully"
+                summary = (args or {}).get("summary") or (args or {}).get("note") or "Customer confirmed the request was completed."
+                info = summary
+                output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-            elif name == "handoff_to_human":
-                action = "handoff_to_human"
-                reason = (args or {}).get("reason") or "Caller requested human agent"
-                department = (args or {}).get("department")
-                output_payload = {"result": "ok", "action": action, "reason": reason, "department": department}
-                info = reason if not department else f"{reason}. dept={department}"
+                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+            elif name in ("handoff_to_human", "end_conversation_with_escalation"):
+                action = "end_conversation_with_escalation"
+                reason = (args or {}).get("reason") or "Caller requested escalation"
+                output_payload = {"result": "ok", "action": action, "reason": reason}
+                info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
+                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
             else:
                 output_payload = {"result": "ignored", "reason": "unknown_function"}
 
@@ -514,21 +575,64 @@ class OpenAIRealtimeClient:
             await self._safe_send(json.dumps(event1))
             self.logger.info(f"[FunctionCall] Sent function_call_output for call_id={call_id} payload={json.dumps(output_payload)[:512]}")
 
-            # Ask model to produce a short, final audio message
-            event2 = {
-                "type": "response.create",
-                "response": {
-                    "conversation": "none",
-                    "output_modalities": ["audio"],
-                    "instructions": "Acknowledge the user's request and say a brief, courteous goodbye in one short sentence.",
-                    "metadata": {"type": "final_farewell"}
+            if closing_instruction:
+                event2 = {
+                    "type": "response.create",
+                    "response": {
+                        "conversation": "none",
+                        "output_modalities": ["audio"],
+                        "instructions": closing_instruction,
+                        "metadata": {"type": "final_farewell"}
+                    }
                 }
-            }
-            await self._safe_send(json.dumps(event2))
-            if self._disconnect_context:
-                self.logger.info(f"[FunctionCall] Scheduled Genesys disconnect after farewell: action={self._disconnect_context.get('action')}, reason={self._disconnect_context.get('reason')}, info={self._disconnect_context.get('info')}")
+                await self._safe_send(json.dumps(event2))
+                if self._disconnect_context:
+                    self.logger.info(
+                        f"[FunctionCall] Scheduled Genesys disconnect after farewell: action={self._disconnect_context.get('action')}, reason={self._disconnect_context.get('reason')}, info={self._disconnect_context.get('info')}"
+                    )
         except Exception as e:
             self.logger.error(f"[FunctionCall] Error handling function call {name}: {e}")
+
+    def register_genesys_tool_handlers(self, handlers: Optional[Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]]):
+        self.genesys_tool_handlers = handlers or {}
+
+    async def _handle_genesys_tool_call(self, name: str, call_id: str, args: Dict[str, Any]):
+        handler = self.genesys_tool_handlers.get(name)
+        if not handler:
+            self.logger.warning(f"[FunctionCall] No handler registered for tool {name}")
+            return
+        try:
+            result_payload = await handler(args)
+            output_payload = {
+                "status": "ok",
+                "tool": name,
+                "result": result_payload
+            }
+            self.logger.info(f"[FunctionCall] Genesys tool {name} executed successfully")
+        except Exception as exc:
+            output_payload = {
+                "status": "error",
+                "tool": name,
+                "message": str(exc)
+            }
+            self.logger.error(f"[FunctionCall] Genesys tool {name} failed: {exc}")
+
+        await self._send_function_output(call_id, output_payload)
+        await self._safe_send(json.dumps({"type": "response.create"}))
+
+    async def _send_function_output(self, call_id: str, payload: Dict[str, Any]):
+        try:
+            event = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(payload)
+                }
+            }
+            await self._safe_send(json.dumps(event))
+        except Exception as exc:
+            self.logger.error(f"[FunctionCall] Failed to send function output for {call_id}: {exc}")
 
     async def close(self):
         duration = time.time() - self.start_time
