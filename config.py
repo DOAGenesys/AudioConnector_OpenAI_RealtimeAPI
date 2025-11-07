@@ -141,11 +141,13 @@ RATE_LIMIT_PHASES = [
 ]
 
 # Genesys rate limiting constants (to respect Audio Hook limits)
-GENESYS_MSG_RATE_LIMIT = 10
-GENESYS_BINARY_RATE_LIMIT = 50
-GENESYS_MSG_BURST_LIMIT = 50
-GENESYS_BINARY_BURST_LIMIT = 150
-GENESYS_RATE_WINDOW = 1.0
+# Conservative limits to prevent 429 errors and connection drops
+# Genesys AudioHook enforces strict rate limits - we stay well under them
+GENESYS_MSG_RATE_LIMIT = 10          # Messages per second
+GENESYS_BINARY_RATE_LIMIT = 10       # Audio frames per second (conservative to avoid 429)
+GENESYS_MSG_BURST_LIMIT = 20         # Message burst capacity
+GENESYS_BINARY_BURST_LIMIT = 30      # Audio frame burst capacity (conservative)
+GENESYS_RATE_WINDOW = 1.0            # Rate limit window in seconds
 
 LOG_FILE = "logging.txt"
 LOGGING_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
