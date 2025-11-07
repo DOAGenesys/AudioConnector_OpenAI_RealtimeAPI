@@ -514,7 +514,7 @@ class OpenAIRealtimeClient:
                                 summary_str = ", ".join(output_summary) if output_summary else "no output"
                                 self.logger.info(f"[FunctionCall] response.done id={response_id}, status={response_status}, output=[{summary_str}]")
                                 
-                                meta = response_obj.get("metadata", {})
+                                meta = response_obj.get("metadata") or {}
                                 if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
                                     self._summary_future.set_result(msg_dict)
 
