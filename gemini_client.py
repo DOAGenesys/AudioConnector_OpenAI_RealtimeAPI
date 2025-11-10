@@ -424,39 +424,62 @@ class GeminiRealtimeClient:
         self.read_task = asyncio.create_task(_read_loop())
 
     async def _update_token_metrics(self, usage_metadata):
-        """Update token tracking from Gemini usage metadata."""
-        try:
-            # Update totals
-            if hasattr(usage_metadata, 'total_token_count'):
-                total = usage_metadata.total_token_count
-            if hasattr(usage_metadata, 'prompt_token_count'):
-                self._total_prompt_tokens = usage_metadata.prompt_token_count
-            if hasattr(usage_metadata, 'candidates_token_count'):
-                self._total_candidates_tokens = usage_metadata.candidates_token_count
+        """
+        Update token tracking from Gemini usage metadata.
 
-            # Update detailed breakdown by modality
+        For Gemini Live API:
+        - usage_metadata.prompt_token_count = total input tokens for this turn
+        - usage_metadata.candidates_token_count = total output tokens for this turn
+        - Gemini Live API doesn't break down by modality, but for audio conversations,
+          most tokens are audio tokens (input: 1 token/100ms, output: 1 token/50ms)
+        """
+        try:
+            # Get token counts for this turn
+            prompt_tokens_this_turn = 0
+            candidates_tokens_this_turn = 0
+
+            if hasattr(usage_metadata, 'prompt_token_count'):
+                prompt_tokens_this_turn = usage_metadata.prompt_token_count
+                self._total_prompt_tokens = prompt_tokens_this_turn
+
+            if hasattr(usage_metadata, 'candidates_token_count'):
+                candidates_tokens_this_turn = usage_metadata.candidates_token_count
+                self._total_candidates_tokens = candidates_tokens_this_turn
+
+            # For Live API audio conversations, tokens are primarily audio
+            # Accumulate input audio tokens from this turn
+            if prompt_tokens_this_turn > 0:
+                self._token_details['input_audio_tokens'] += prompt_tokens_this_turn
+
+            # Accumulate output tokens from this turn
+            # Check if response_tokens_details is available for modality breakdown
             if hasattr(usage_metadata, 'response_tokens_details'):
                 for detail in usage_metadata.response_tokens_details:
                     if isinstance(detail, types.ModalityTokenCount):
                         modality = detail.modality
                         count = detail.token_count
 
-                        # Map modality to our tracking
+                        # Map modality to our tracking (accumulate)
                         if modality == "TEXT":
                             self._token_details['output_text_tokens'] += count
                         elif modality == "AUDIO":
                             self._token_details['output_audio_tokens'] += count
-
-            # For input tokens, we'll estimate based on prompt tokens
-            # Gemini doesn't break down input by modality in the same way
-            # We'll assume audio dominates for realtime voice
-            self._token_details['input_audio_tokens'] = self._total_prompt_tokens
+            else:
+                # If no modality breakdown, assume all output is audio for Live API
+                if candidates_tokens_this_turn > 0:
+                    self._token_details['output_audio_tokens'] += candidates_tokens_this_turn
 
             if DEBUG == 'true':
-                self.logger.debug(f"Token metrics updated: prompt={self._total_prompt_tokens}, candidates={self._total_candidates_tokens}")
+                self.logger.debug(
+                    f"Token metrics updated - This turn: prompt={prompt_tokens_this_turn}, "
+                    f"candidates={candidates_tokens_this_turn} | "
+                    f"Cumulative: input_audio={self._token_details['input_audio_tokens']}, "
+                    f"output_audio={self._token_details['output_audio_tokens']}, "
+                    f"output_text={self._token_details['output_text_tokens']}"
+                )
 
         except Exception as e:
-            self.logger.error(f"Error updating token metrics: {e}")
+            self.logger.error(f"Error updating token metrics: {e}", exc_info=True)
 
     async def _handle_function_call(self, name: str, call_id: str, args: dict):
         """Handle function calls from Gemini."""

@@ -70,8 +70,7 @@ class AudioHookServer:
         self.genesys_tool_context = None
         self.session_outcome = {
             "escalation_required": False,
-            "escalation_reason": "",
-            "completion_summary": ""
+            "escalation_reason": ""
         }
 
         self.logger.info(f"New session started: {self.session_id}")
@@ -514,11 +513,9 @@ class AudioHookServer:
 
     async def _on_end_call_request(self, reason: str, info: str):
         self.logger.info(f"[FunctionCall] OpenAI requested end_call. reason={reason}, info={info}")
-        summary_text = info or reason or "Call completed"
         self.session_outcome.update({
             "escalation_required": False,
-            "escalation_reason": "",
-            "completion_summary": summary_text
+            "escalation_reason": ""
         })
         await self.disconnect_session(reason=reason or "completed", info=info or "")
 
@@ -527,8 +524,7 @@ class AudioHookServer:
         escalation_reason = info or reason or "Customer requested escalation to agent"
         self.session_outcome.update({
             "escalation_required": True,
-            "escalation_reason": escalation_reason,
-            "completion_summary": ""
+            "escalation_reason": escalation_reason
         })
         await self.disconnect_session(reason="completed", info=escalation_reason)
 
@@ -725,34 +721,34 @@ class AudioHookServer:
                     # Gemini client
                     token_metrics = self.openai_client.get_token_metrics()
                     self.logger.info(f"[FunctionCall] Token usage (Gemini): {token_metrics}")
-                elif hasattr(self.openai_client, 'last_response') and self.openai_client.last_response:
-                    # OpenAI client
-                    usage = self.openai_client.last_response.get("usage", {})
-                    token_details = usage.get("input_token_details", {})
-                    cached_details = token_details.get("cached_tokens_details", {})
-                    output_details = usage.get("output_token_details", {})
-
+                elif hasattr(self.openai_client, 'cumulative_tokens'):
+                    # OpenAI client - use cumulative tokens tracked across all responses
+                    cumulative = self.openai_client.cumulative_tokens
                     token_metrics = {
-                        "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
-                        "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
-                        "TOTAL_INPUT_AUDIO_TOKENS": str(token_details.get("audio_tokens", 0)),
-                        "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cached_details.get("audio_tokens", 0)),
-                        "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
-                        "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
+                        "TOTAL_INPUT_TEXT_TOKENS": str(cumulative.get("input_text_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cumulative.get("input_cached_text_tokens", 0)),
+                        "TOTAL_INPUT_AUDIO_TOKENS": str(cumulative.get("input_audio_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cumulative.get("input_cached_audio_tokens", 0)),
+                        "TOTAL_OUTPUT_TEXT_TOKENS": str(cumulative.get("output_text_tokens", 0)),
+                        "TOTAL_OUTPUT_AUDIO_TOKENS": str(cumulative.get("output_audio_tokens", 0))
                     }
                     self.logger.info(f"[FunctionCall] Token usage (OpenAI): {token_metrics}")
 
+            # Build output variables - ensure all are always populated
+            outcome = self.session_outcome or {}
             output_vars = {
                 "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
                 "CONVERSATION_DURATION": str(time.time() - self.start_time),
-                **token_metrics
-            }
-            outcome = self.session_outcome or {}
-            output_vars.update({
                 "ESCALATION_REQUIRED": "true" if outcome.get("escalation_required") else "false",
                 "ESCALATION_REASON": outcome.get("escalation_reason", ""),
-                "COMPLETION_SUMMARY": outcome.get("completion_summary", "")
-            })
+                # Add token metrics (will be populated if available, otherwise defaults to "0")
+                "TOTAL_INPUT_TEXT_TOKENS": token_metrics.get("TOTAL_INPUT_TEXT_TOKENS", "0"),
+                "TOTAL_INPUT_CACHED_TEXT_TOKENS": token_metrics.get("TOTAL_INPUT_CACHED_TEXT_TOKENS", "0"),
+                "TOTAL_INPUT_AUDIO_TOKENS": token_metrics.get("TOTAL_INPUT_AUDIO_TOKENS", "0"),
+                "TOTAL_INPUT_CACHED_AUDIO_TOKENS": token_metrics.get("TOTAL_INPUT_CACHED_AUDIO_TOKENS", "0"),
+                "TOTAL_OUTPUT_TEXT_TOKENS": token_metrics.get("TOTAL_OUTPUT_TEXT_TOKENS", "0"),
+                "TOTAL_OUTPUT_AUDIO_TOKENS": token_metrics.get("TOTAL_OUTPUT_AUDIO_TOKENS", "0")
+            }
 
             disconnect_msg = {
                 "version": "2",
