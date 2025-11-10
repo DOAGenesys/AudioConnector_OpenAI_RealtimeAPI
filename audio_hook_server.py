@@ -643,23 +643,22 @@ class AudioHookServer:
                 self.logger.info(f"[FunctionCall] Closing OpenAI connection")
                 await self.openai_client.close()
 
-            # Get token usage from OpenAI client's last response if available
+            # Get cumulative token usage from OpenAI client if available
             token_metrics = {}
-            if self.openai_client and hasattr(self.openai_client, 'last_response') and self.openai_client.last_response:
-                usage = self.openai_client.last_response.get("usage", {})
-                token_details = usage.get("input_token_details", {})
-                cached_details = token_details.get("cached_tokens_details", {})
-                output_details = usage.get("output_token_details", {})
-
-                token_metrics = {
-                    "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_AUDIO_TOKENS": str(token_details.get("audio_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cached_details.get("audio_tokens", 0)),
-                    "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
-                    "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
-                }
-                self.logger.info(f"[FunctionCall] Token usage: {token_metrics}")
+            if self.openai_client and hasattr(self.openai_client, 'cumulative_tokens'):
+                try:
+                    cumulative = self.openai_client.cumulative_tokens
+                    token_metrics = {
+                        "TOTAL_INPUT_TEXT_TOKENS": str(cumulative.get("input_text_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cumulative.get("input_cached_text_tokens", 0)),
+                        "TOTAL_INPUT_AUDIO_TOKENS": str(cumulative.get("input_audio_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cumulative.get("input_cached_audio_tokens", 0)),
+                        "TOTAL_OUTPUT_TEXT_TOKENS": str(cumulative.get("output_text_tokens", 0)),
+                        "TOTAL_OUTPUT_AUDIO_TOKENS": str(cumulative.get("output_audio_tokens", 0))
+                    }
+                    self.logger.info(f"[FunctionCall] Cumulative token usage: {token_metrics}")
+                except Exception as token_err:
+                    self.logger.error(f"[FunctionCall] Error extracting cumulative token usage: {token_err}", exc_info=True)
 
             output_vars = {
                 "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
