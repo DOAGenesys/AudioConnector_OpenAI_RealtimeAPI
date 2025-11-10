@@ -1,6 +1,6 @@
 # Genesys & OpenAI Real-Time Voice Connector
 
-A real-time voice connector that bridges Genesys Cloud Audio Connector with OpenAI's Real-Time API, enabling intelligent voicebot interactions with live phone calls through speech-to-speech processing.
+A real-time voice connector that bridges Genesys Cloud Audio Connector with OpenAI's Real-Time API, enabling intelligent voice agent assisted interactions with live phone calls through speech-to-speech processing.
 
 ## Overview
 
