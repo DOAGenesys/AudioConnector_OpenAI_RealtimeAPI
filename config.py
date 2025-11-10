@@ -43,6 +43,9 @@ AI_VENDOR = os.getenv('AI_VENDOR', 'openai').lower()
 if AI_VENDOR not in ('openai', 'gemini'):
     raise ValueError(f"AI_VENDOR must be 'openai' or 'gemini', got '{AI_VENDOR}'")
 
+# Alias for compatibility with provider abstraction layer
+AI_PROVIDER = AI_VENDOR
+
 # Vendor-specific API keys
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -179,8 +182,11 @@ LOGGING_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
 if os.path.exists(LOG_FILE):
     os.remove(LOG_FILE)
 
+# Set root logger level based on DEBUG environment variable
+root_log_level = logging.DEBUG if DEBUG == 'true' else logging.INFO
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=root_log_level,
     format=LOGGING_FORMAT,
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -190,8 +196,16 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("GenesysOpenAIBridge")
-websockets_logger = logging.getLogger('websockets')
-websockets_logger.setLevel(logging.INFO)
+logger.setLevel(root_log_level)
 
+# Suppress verbose third-party library logs when not in DEBUG mode
 if DEBUG != 'true':
-    logger.setLevel(logging.INFO)
+    # Suppress numba debug logs
+    logging.getLogger('numba').setLevel(logging.WARNING)
+    # Suppress librosa debug logs
+    logging.getLogger('librosa').setLevel(logging.WARNING)
+    # Keep websockets at INFO level
+    logging.getLogger('websockets').setLevel(logging.INFO)
+else:
+    # In DEBUG mode, keep websockets at INFO to avoid excessive logs
+    logging.getLogger('websockets').setLevel(logging.INFO)

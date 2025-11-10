@@ -226,11 +226,11 @@ class GeminiRealtimeClient:
             )
 
             # Build tool declarations for Gemini
-            tools = []
+            function_declarations = []
 
             # Add call control tools
             call_control_tools = _default_call_control_tools()
-            tools.extend(call_control_tools)
+            function_declarations.extend(call_control_tools)
 
             # Add custom tool definitions (Genesys data actions, etc.)
             if self.custom_tool_definitions:
@@ -242,7 +242,7 @@ class GeminiRealtimeClient:
                             "description": tool.get("description", ""),
                             "parameters": tool.get("parameters", {})
                         }
-                        tools.append(func_def)
+                        function_declarations.append(func_def)
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -250,6 +250,11 @@ class GeminiRealtimeClient:
             if self.tool_instruction_text:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
+
+            # Build tools in the format Gemini expects: [{"function_declarations": [...]}]
+            tools = None
+            if function_declarations:
+                tools = [types.Tool(function_declarations=function_declarations)]
 
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
@@ -261,7 +266,7 @@ class GeminiRealtimeClient:
                         )
                     )
                 ),
-                tools=tools if tools else None,
+                tools=tools,
             )
 
             # Connect to Live API
@@ -274,7 +279,7 @@ class GeminiRealtimeClient:
             self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
             self.running = True
 
-            tool_names = [t.get("name", "unknown") for t in tools]
+            tool_names = [f.get("name", "unknown") for f in function_declarations]
             self.logger.info(
                 f"[FunctionCall] Configured Gemini tools: {tool_names}; voice={self.voice}"
             )
@@ -500,16 +505,13 @@ class GeminiRealtimeClient:
 
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=True
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
             self.logger.info(f"[FunctionCall] Sent function response for {name}")
@@ -563,16 +565,13 @@ class GeminiRealtimeClient:
         try:
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=True
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
             self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name}")
