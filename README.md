@@ -228,7 +228,7 @@ Create an inbound call flow with the Call Audio Connector action referencing you
 
 <img width="447" height="870" alt="image" src="https://github.com/user-attachments/assets/c32f9173-2459-4b3d-8851-a78dfadf30a0" />
 
-You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v10-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` and `Genesys Data Action Tools` sections below), which will determine agentic tool usage. Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
+You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v16-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` and `Genesys Data Action Tools` sections below), which will determine agentic tool usage. Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
 
 ## Session Variables
 
@@ -247,6 +247,8 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
+| `SUCCESS_PROMPT` | Custom farewell message for successful call completion (exact words the AI will say when ending successfully) | Not set (uses default farewell) |
+| `ESCALATION_PROMPT` | Custom transfer message for escalation to human agent (exact words the AI will say when escalating) | Not set (uses default transfer message) |
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
 | `DATA_ACTION_DESCRIPTIONS` | Pipe-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
 | `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
@@ -282,12 +284,29 @@ The middleware exposes both call-control functions and optional Genesys Cloud Da
 ### Call-Control Functions
 
 #### `end_conversation_successfully`
-Triggered when the caller confirms their request is complete. The model sends a short `summary` describing what was accomplished. The function result is fed back to the AI, which then generates a natural farewell message to the caller. Once this farewell audio completes playing, the connector waits for the audio buffer to fully drain (ensuring the caller hears the entire goodbye), then gracefully disconnects the AudioHook session with `ESCALATION_REQUIRED=false` and `COMPLETION_SUMMARY` containing the provided summary.
+**When to invoke:** ONLY when BOTH conditions are met:
+1. The caller's request has been completely addressed and resolved
+2. The caller has explicitly confirmed they don't need any additional help or have no further questions
+
+**Behavior:** The model sends a short `summary` describing what was accomplished. The function result is fed back to the AI, which then generates a farewell message to the caller.
+
+**Custom Farewell Messages:** Use the `SUCCESS_PROMPT` input session variable to specify the exact farewell message the AI should say (e.g., "Thank you for calling Acme Corp. Have a great day!"). If not set, a default farewell will be generated.
+
+Once the farewell audio completes playing, the connector waits for the audio buffer to fully drain (ensuring the caller hears the entire goodbye), then gracefully disconnects the AudioHook session with `ESCALATION_REQUIRED=false` and `COMPLETION_SUMMARY` containing the provided summary.
 
 #### `end_conversation_with_escalation`
-Triggered when the caller explicitly requests a human agent, shows frustration, or the task cannot be completed. The model passes a `reason` explaining why escalation is needed. The function result is sent back to the AI, which generates an appropriate transition message (e.g., "I'll connect you with an agent who can help"). After this message plays completely, the connector disconnects the AudioHook session with `ESCALATION_REQUIRED=true` and `ESCALATION_REASON` populated, allowing Architect to branch into a transfer queue or escalation flow.
+**When to invoke:** When the caller explicitly requests a human agent, shows frustration, or the task cannot be completed.
 
-Both functions include clear instructions in the system prompt so the model knows exactly when to invoke them. The connector ensures all farewell audio is delivered to the caller before disconnecting, providing a smooth conversational conclusion.
+**Behavior:** The model passes a `reason` explaining why escalation is needed. The function result is sent back to the AI, which generates a transition message to prepare the caller for the handoff.
+
+**Custom Transfer Messages:** Use the `ESCALATION_PROMPT` input session variable to specify the exact transfer message the AI should say (e.g., "Let me connect you with one of our specialists who can better assist you"). If not set, a default transfer message will be generated.
+
+After this message plays completely, the connector disconnects the AudioHook session with `ESCALATION_REQUIRED=true` and `ESCALATION_REASON` populated, allowing Architect to branch into a transfer queue or escalation flow.
+
+**Important:** Both functions ensure that:
+- All output session variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`, token metrics, etc.) are properly filled with accurate values before disconnecting
+- The complete farewell or transfer message is delivered to the caller (audio buffer fully drained)
+- The system prompt clearly instructs the AI when these functions should be invoked
 
 ### Genesys Data Action Tools
 
