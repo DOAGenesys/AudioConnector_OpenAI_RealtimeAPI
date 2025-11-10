@@ -458,6 +458,9 @@ class AudioHookServer:
                 )
                 self.openai_client.language = language
                 self.openai_client.customer_data = customer_data
+                # Set custom farewell prompts if provided
+                self.openai_client.escalation_prompt = escalation_prompt
+                self.openai_client.success_prompt = success_prompt
                 # Wire callbacks for function-calling driven disconnects
                 self.openai_client.on_end_call_request = self._on_end_call_request
                 self.openai_client.on_handoff_request = self._on_handoff_request
@@ -484,6 +487,9 @@ class AudioHookServer:
                 self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
                 self.openai_client.language = language
                 self.openai_client.customer_data = customer_data
+                # Set custom farewell prompts if provided
+                self.openai_client.escalation_prompt = escalation_prompt
+                self.openai_client.success_prompt = success_prompt
                 # Wire callbacks for function-calling driven disconnects
                 self.openai_client.on_end_call_request = self._on_end_call_request
                 self.openai_client.on_handoff_request = self._on_handoff_request
@@ -606,13 +612,16 @@ class AudioHookServer:
             return None
 
         try:
+            # Request a plain text summary (not JSON)
+            plain_text_summary_prompt = "Please provide a brief, compact summary of this conversation in plain text (2-3 sentences). Do not use JSON format, just plain text."
+
             ending_prompt = {
                 "type": "response.create",
                 "response": {
                     "conversation": "none",
                     "output_modalities": ["text"],
                     "metadata": {"type": "ending_analysis"},
-                    "instructions": ENDING_PROMPT
+                    "instructions": plain_text_summary_prompt
                 }
             }
 
@@ -622,20 +631,17 @@ class AudioHookServer:
                 data = await self.openai_client.await_summary(timeout=10)
                 if data:
                     summary = data.get("response", {}).get("output", [{}])[0].get("text")
-                # Parse JSON summary
+                # Return the plain text summary as-is
                 if summary:
-                    try:
-                        summary_dict = json.loads(summary)
-                        return summary_dict
-                    except json.JSONDecodeError:
-                        self.logger.error("Failed to parse summary JSON")
-                        return {"error": "Failed to parse summary"}
+                    return summary.strip()
+                else:
+                    return None
             except asyncio.TimeoutError:
                 self.logger.error("Timeout generating session summary")
-                return {"error": "Timeout generating summary"}
+                return None
         except Exception as e:
             self.logger.error(f"Error generating session summary: {e}")
-            return {"error": str(e)}
+            return None
 
     async def handle_close(self, msg: dict):
         """
@@ -701,16 +707,11 @@ class AudioHookServer:
             await self.stop_audio_processing()
             self.logger.info(f"[FunctionCall] Audio processing stopped")
 
-            # Generate summary only if we don't have outcome data from function calls
+            # Always generate conversation summary as plain text (required for CONVERSATION_SUMMARY output variable)
             summary_data = None
-            outcome = self.session_outcome or {}
-            has_outcome_data = outcome.get("escalation_required") or outcome.get("completion_summary")
-            
-            if not has_outcome_data and self.openai_client:
+            if self.openai_client:
                 self.logger.info(f"[FunctionCall] Generating conversation summary before disconnect")
                 summary_data = await self.generate_session_summary()
-            elif has_outcome_data:
-                self.logger.info(f"[FunctionCall] Skipping summary generation - already have outcome data from function call")
             
             # Close OpenAI connection after summary (if generated) and audio buffer has drained
             if self.openai_client:
@@ -743,7 +744,7 @@ class AudioHookServer:
                     self.logger.info(f"[FunctionCall] Token usage (OpenAI): {token_metrics}")
 
             output_vars = {
-                "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
+                "CONVERSATION_SUMMARY": summary_data if summary_data else "",
                 "CONVERSATION_DURATION": str(time.time() - self.start_time),
                 **token_metrics
             }

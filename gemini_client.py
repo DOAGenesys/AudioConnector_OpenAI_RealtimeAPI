@@ -108,6 +108,8 @@ class GeminiRealtimeClient:
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
         self._response_in_progress = False
         self._has_audio_in_buffer = False
+        self.escalation_prompt = None
+        self.success_prompt = None
 
         # Token tracking for Gemini
         self._total_prompt_tokens = 0
@@ -485,7 +487,12 @@ class GeminiRealtimeClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                # Use custom SUCCESS_PROMPT if provided, otherwise use default
+                if self.success_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
+                else:
+                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
                 reason = (args or {}).get("reason") or "Caller requested escalation"
@@ -493,7 +500,12 @@ class GeminiRealtimeClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Use custom ESCALATION_PROMPT if provided, otherwise use default
+                if self.escalation_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
+                else:
+                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}")
                 output_payload = {"result": "error", "error": f"Unknown function: {name}"}
@@ -509,14 +521,22 @@ class GeminiRealtimeClient:
                     role="user",
                     parts=[types.Part(function_response=function_response)]
                 ),
-                turn_complete=True
+                turn_complete=False
             )
 
             self.logger.info(f"[FunctionCall] Sent function response for {name}")
 
             if closing_instruction and self._disconnect_context:
+                # Send the closing instruction to make Gemini say the farewell
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=closing_instruction)]
+                    ),
+                    turn_complete=True
+                )
                 self.logger.info(
-                    f"[FunctionCall] Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
+                    f"[FunctionCall] Sent closing instruction to Gemini. Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
                 )
 
         except Exception as e:
