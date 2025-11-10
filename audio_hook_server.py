@@ -458,6 +458,8 @@ class AudioHookServer:
                 )
                 self.openai_client.language = language
                 self.openai_client.customer_data = customer_data
+                self.openai_client.escalation_prompt = escalation_prompt
+                self.openai_client.success_prompt = success_prompt
                 # Wire callbacks for function-calling driven disconnects
                 self.openai_client.on_end_call_request = self._on_end_call_request
                 self.openai_client.on_handoff_request = self._on_handoff_request
@@ -484,6 +486,8 @@ class AudioHookServer:
                 self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
                 self.openai_client.language = language
                 self.openai_client.customer_data = customer_data
+                self.openai_client.escalation_prompt = escalation_prompt
+                self.openai_client.success_prompt = success_prompt
                 # Wire callbacks for function-calling driven disconnects
                 self.openai_client.on_end_call_request = self._on_end_call_request
                 self.openai_client.on_handoff_request = self._on_handoff_request
