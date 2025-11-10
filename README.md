@@ -274,11 +274,12 @@ This variable provides natural language descriptions for each data action, helpi
 - **Content**: Clear, concise descriptions explaining what each data action does, including key parameters and use cases
 - **Order**: Must align exactly with the order of IDs in `DATA_ACTION_IDS` (first description maps to first ID, second to second, etc.)
 - **Quality**: Well-written descriptions directly impact the AI's ability to select the right tool at the right time
+- **Input params**: In case you want to hardcode values for any of the input params to be used, just include that part in the description (as I do on my example below for the first data action)
 
 **Example:**
 
 ```
-Searches knowledge base articles to address general FAQ questions, using semantic query matching with configurable confidence threshold and result limits. Use this to provide RAG responses|Retrieves complete ticket details including customer information, journey stations, departure schedule, and fare class using ticket reference number|Checks availability for ticket modifications and returns alternative departure times and fare class options with associated change fees|Updates ticket booking with new departure date/time and fare class selections after customer confirmation
+Searches knowledge base articles to address general FAQ questions, using semantic query matching with configurable confidence threshold and result limits. Use this to provide RAG responses. For the KBId input param, use dc8de859-0102-4ebd-b216-f3f31e1c78c6, for minConfidence use 0.6 and for maxArticles use 3 |Retrieves complete ticket details including customer information, journey stations, departure schedule, and fare class using ticket reference number|Checks availability for ticket modifications and returns alternative departure times and fare class options with associated change fees|Updates ticket booking with new departure date/time and fare class selections after customer confirmation
 ```
 
 ##### Why These Variables Are Critical
