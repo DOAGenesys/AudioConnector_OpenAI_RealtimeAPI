@@ -19,11 +19,15 @@ from config import (
     AUDIO_BUFFER_WARNING_THRESHOLD_HIGH,
     AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM,
     ENDING_PROMPT,
-    ENDING_TEMPERATURE
+    ENDING_TEMPERATURE,
+    AI_VENDOR,
+    GEMINI_API_KEY,
+    GEMINI_MODEL
 )
 
 from rate_limiter import RateLimiter
 from openai_client import OpenAIRealtimeClient
+from gemini_client import GeminiRealtimeClient
 from utils import format_json, parse_iso8601_duration
 from genesys_actions import build_genesys_tool_context
 from mcp_tools import load_mcp_tool_context
@@ -407,28 +411,61 @@ class AudioHookServer:
             self.logger.debug("Customer data provided for personalization")
 
         try:
-            self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
-            self.openai_client.language = language
-            self.openai_client.customer_data = customer_data
-            # Wire callbacks for function-calling driven disconnects
-            self.openai_client.on_end_call_request = self._on_end_call_request
-            self.openai_client.on_handoff_request = self._on_handoff_request
-            self.logger.info("[FunctionCall] OpenAI callbacks wired: on_end_call_request and on_handoff_request")
-            if self.genesys_tool_context:
-                self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
-            await self.openai_client.connect(
-                instructions=instructions,
-                voice=voice,
-                temperature=temperature,
-                model=model,
-                max_output_tokens=max_output_tokens,
-                agent_name=agent_name,
-                company_name=company_name,
-                tool_definitions=tool_definitions_payload,
-                tool_instructions=tool_instructions
-            )
+            # Create the appropriate AI client based on vendor selection
+            if AI_VENDOR == 'gemini':
+                self.logger.info(f"[AI Vendor] Using Gemini Live API")
+                self.openai_client = GeminiRealtimeClient(
+                    self.session_id,
+                    api_key=GEMINI_API_KEY,
+                    on_speech_started_callback=self.handle_speech_started
+                )
+                self.openai_client.language = language
+                self.openai_client.customer_data = customer_data
+                # Wire callbacks for function-calling driven disconnects
+                self.openai_client.on_end_call_request = self._on_end_call_request
+                self.openai_client.on_handoff_request = self._on_handoff_request
+                self.logger.info("[FunctionCall] Gemini callbacks wired: on_end_call_request and on_handoff_request")
+                if self.genesys_tool_context:
+                    self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
+
+                # Use Gemini model if specified in session variables, otherwise use default
+                gemini_model = model if model else GEMINI_MODEL
+
+                await self.openai_client.connect(
+                    instructions=instructions,
+                    voice=voice,
+                    temperature=temperature,
+                    model=gemini_model,
+                    max_output_tokens=max_output_tokens,
+                    agent_name=agent_name,
+                    company_name=company_name,
+                    tool_definitions=tool_definitions_payload,
+                    tool_instructions=tool_instructions
+                )
+            else:  # AI_VENDOR == 'openai'
+                self.logger.info(f"[AI Vendor] Using OpenAI Realtime API")
+                self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
+                self.openai_client.language = language
+                self.openai_client.customer_data = customer_data
+                # Wire callbacks for function-calling driven disconnects
+                self.openai_client.on_end_call_request = self._on_end_call_request
+                self.openai_client.on_handoff_request = self._on_handoff_request
+                self.logger.info("[FunctionCall] OpenAI callbacks wired: on_end_call_request and on_handoff_request")
+                if self.genesys_tool_context:
+                    self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
+                await self.openai_client.connect(
+                    instructions=instructions,
+                    voice=voice,
+                    temperature=temperature,
+                    model=model,
+                    max_output_tokens=max_output_tokens,
+                    agent_name=agent_name,
+                    company_name=company_name,
+                    tool_definitions=tool_definitions_payload,
+                    tool_instructions=tool_instructions
+                )
         except Exception as e:
-            self.logger.error(f"OpenAI connection failed: {e}")
+            self.logger.error(f"AI client connection failed: {e}")
             await self.disconnect_session(reason="error", info=str(e))
             return
 
@@ -643,23 +680,30 @@ class AudioHookServer:
                 self.logger.info(f"[FunctionCall] Closing OpenAI connection")
                 await self.openai_client.close()
 
-            # Get token usage from OpenAI client's last response if available
+            # Get token usage from AI client (vendor-agnostic)
             token_metrics = {}
-            if self.openai_client and hasattr(self.openai_client, 'last_response') and self.openai_client.last_response:
-                usage = self.openai_client.last_response.get("usage", {})
-                token_details = usage.get("input_token_details", {})
-                cached_details = token_details.get("cached_tokens_details", {})
-                output_details = usage.get("output_token_details", {})
+            if self.openai_client:
+                # Check if this is a Gemini client (has get_token_metrics method)
+                if hasattr(self.openai_client, 'get_token_metrics'):
+                    # Gemini client
+                    token_metrics = self.openai_client.get_token_metrics()
+                    self.logger.info(f"[FunctionCall] Token usage (Gemini): {token_metrics}")
+                elif hasattr(self.openai_client, 'last_response') and self.openai_client.last_response:
+                    # OpenAI client
+                    usage = self.openai_client.last_response.get("usage", {})
+                    token_details = usage.get("input_token_details", {})
+                    cached_details = token_details.get("cached_tokens_details", {})
+                    output_details = usage.get("output_token_details", {})
 
-                token_metrics = {
-                    "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
-                    "TOTAL_INPUT_AUDIO_TOKENS": str(token_details.get("audio_tokens", 0)),
-                    "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cached_details.get("audio_tokens", 0)),
-                    "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
-                    "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
-                }
-                self.logger.info(f"[FunctionCall] Token usage: {token_metrics}")
+                    token_metrics = {
+                        "TOTAL_INPUT_TEXT_TOKENS": str(token_details.get("text_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(cached_details.get("text_tokens", 0)),
+                        "TOTAL_INPUT_AUDIO_TOKENS": str(token_details.get("audio_tokens", 0)),
+                        "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(cached_details.get("audio_tokens", 0)),
+                        "TOTAL_OUTPUT_TEXT_TOKENS": str(output_details.get("text_tokens", 0)),
+                        "TOTAL_OUTPUT_AUDIO_TOKENS": str(output_details.get("audio_tokens", 0))
+                    }
+                    self.logger.info(f"[FunctionCall] Token usage (OpenAI): {token_metrics}")
 
             output_vars = {
                 "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",

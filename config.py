@@ -38,14 +38,28 @@ AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 # Server settings
 GENESYS_PATH = "/audiohook"
 
+# AI Vendor selection (openai or gemini)
+AI_VENDOR = os.getenv('AI_VENDOR', 'openai').lower()
+if AI_VENDOR not in ('openai', 'gemini'):
+    raise ValueError(f"AI_VENDOR must be 'openai' or 'gemini', got '{AI_VENDOR}'")
+
 # OpenAI Realtime API settings
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables.")
-
 OPENAI_MODEL = os.getenv('OPENAI_MODEL')
 if not OPENAI_MODEL:
     OPENAI_MODEL = "gpt-realtime-mini"
+
+# Gemini Live API settings
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL')
+if not GEMINI_MODEL:
+    GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
+
+# Validate that the appropriate API key is set for the selected vendor
+if AI_VENDOR == 'openai' and not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in environment variables but AI_VENDOR is set to 'openai'.")
+elif AI_VENDOR == 'gemini' and not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables but AI_VENDOR is set to 'gemini'.")
 
 DEFAULT_AGENT_NAME = os.getenv('AGENT_NAME', 'AI Assistant')
 DEFAULT_COMPANY_NAME = os.getenv('COMPANY_NAME', 'Our Company')
