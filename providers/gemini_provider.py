@@ -154,6 +154,8 @@ class GeminiLiveClient:
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
         self._response_in_progress = False
         self._has_audio_in_buffer = False
+        self.escalation_prompt = None
+        self.success_prompt = None
 
         # Gemini-specific state
         self._pending_function_calls: Dict[str, Dict[str, Any]] = {}
@@ -619,7 +621,12 @@ class GeminiLiveClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                # Use custom SUCCESS_PROMPT if provided, otherwise use default
+                if self.success_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
+                else:
+                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
 
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
@@ -628,7 +635,12 @@ class GeminiLiveClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Use custom ESCALATION_PROMPT if provided, otherwise use default
+                if self.escalation_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
+                else:
+                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
 
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}. Sending error response.")

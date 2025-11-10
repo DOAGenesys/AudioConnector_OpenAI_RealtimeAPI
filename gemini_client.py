@@ -114,6 +114,8 @@ class GeminiRealtimeClient:
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
         self._response_in_progress = False
         self._has_audio_in_buffer = False
+        self.escalation_prompt = None
+        self.success_prompt = None
 
         # Token tracking for Gemini
         self._total_prompt_tokens = 0
@@ -590,14 +592,22 @@ class GeminiRealtimeClient:
                     role="user",
                     parts=[types.Part(function_response=function_response)]
                 ),
-                turn_complete=True
+                turn_complete=False
             )
 
             self.logger.info(f"[FunctionCall] Sent function response for {name}")
 
             if closing_instruction and self._disconnect_context:
+                # Send the closing instruction to make Gemini say the farewell
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=closing_instruction)]
+                    ),
+                    turn_complete=True
+                )
                 self.logger.info(
-                    f"[FunctionCall] Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
+                    f"[FunctionCall] Sent closing instruction to Gemini. Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
                 )
 
         except Exception as e:
