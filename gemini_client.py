@@ -165,9 +165,10 @@ class GeminiRealtimeClient:
             'output_audio_tokens': 0
         }
 
-        # Gemini client
+        # Gemini client and session context
         self.client = None
         self.model = None
+        self._session_context = None
 
         # Custom farewell prompts
         self.escalation_prompt = None
@@ -261,7 +262,17 @@ class GeminiRealtimeClient:
             self.temperature = DEFAULT_TEMPERATURE
 
         # Use Gemini 2.5 Flash Native Audio model
-        self.model = model if model else "gemini-2.5-flash-native-audio-preview-09-2025"
+        # Validate that the model is a Gemini model, not an OpenAI model
+        default_gemini_model = "gemini-2.5-flash-native-audio-preview-09-2025"
+        if model:
+            # Check if the provided model is an OpenAI model (starts with "gpt-")
+            if model.startswith("gpt-"):
+                self.logger.warning(f"OpenAI model '{model}' specified but using Gemini. Using default Gemini model: {default_gemini_model}")
+                self.model = default_gemini_model
+            else:
+                self.model = model
+        else:
+            self.model = default_gemini_model
 
         try:
             self.logger.info(f"Connecting to Gemini Live API using model: {self.model}...")
@@ -303,7 +314,7 @@ class GeminiRealtimeClient:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
-            # Wrap function declarations in Tool format for SDK
+            # Wrap function declarations in the required tools format
             tools = None
             if function_declarations:
                 tools = [types.Tool(function_declarations=function_declarations)]
@@ -321,11 +332,19 @@ class GeminiRealtimeClient:
                 tools=tools,
             )
 
-            # Connect to Live API
-            self.session = await self.client.aio.live.connect(
+            # Connect to Live API using async context manager
+            # Create the context manager
+            session_cm = self.client.aio.live.connect(
                 model=self.model,
                 config=config
             )
+
+            # Enter the context manager manually to get the session
+            self.session = await session_cm.__aenter__()
+
+            # Only set _session_context after successful entry
+            # (if __aenter__ fails, we shouldn't call __aexit__)
+            self._session_context = session_cm
 
             connect_time = time.time() - connect_start
             self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
@@ -623,6 +642,7 @@ class GeminiRealtimeClient:
 
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
@@ -635,7 +655,7 @@ class GeminiRealtimeClient:
                 turn_complete=False
             )
 
-            self.logger.info(f"[FunctionCall] Sent function response for {name}")
+            self.logger.info(f"[FunctionCall] Sent function response for {name} (call_id={call_id})")
 
             if closing_instruction and self._disconnect_context:
                 # Send the closing instruction to make Gemini say the farewell
@@ -694,6 +714,7 @@ class GeminiRealtimeClient:
         try:
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
@@ -706,7 +727,7 @@ class GeminiRealtimeClient:
                 turn_complete=True
             )
 
-            self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name}")
+            self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})")
         except Exception as send_exc:
             self.logger.error(f"[FunctionCall] CRITICAL ERROR: Failed to send tool result: {send_exc}", exc_info=True)
 
@@ -716,12 +737,16 @@ class GeminiRealtimeClient:
         self.logger.info(f"Closing Gemini connection after {duration:.2f}s")
         self.running = False
 
-        if self.session:
+        # Exit the async context manager if it exists
+        if self._session_context:
             try:
-                # Gemini session cleanup happens automatically
-                pass
+                await self._session_context.__aexit__(None, None, None)
+                self.logger.debug("Successfully exited Gemini session context")
             except Exception as e:
-                self.logger.error(f"Error closing Gemini session: {e}")
+                self.logger.error(f"Error exiting Gemini session context: {e}")
+            self._session_context = None
+
+        if self.session:
             self.session = None
 
         if self.read_task:
