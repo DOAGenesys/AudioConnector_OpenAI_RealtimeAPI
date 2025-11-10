@@ -485,8 +485,6 @@ See the complete list at: https://ai.google.dev/gemini-api/docs/speech-generatio
 | **Latency** | Very Low | Very Low |
 | **Token Tracking** | Detailed breakdown | Detailed breakdown |
 | **Context Window** | Model-dependent | 128k tokens (native audio models) |
-| **Special Features** | - | Affective dialogue, thinking mode |
-| **Pricing** | Per model tier | Based on Google AI pricing |
 
 **When to choose OpenAI:**
 - You need a well-established API with extensive documentation
