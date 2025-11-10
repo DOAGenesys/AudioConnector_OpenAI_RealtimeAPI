@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import io
+import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from google import genai
@@ -31,6 +32,41 @@ TERMINATION_GUIDANCE = """[CALL CONTROL]
 Call `end_conversation_successfully` when the caller's request has been resolved. Use the `summary` field to explain what was accomplished.
 Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
 Always invoke the correct call-control tool as soon as the user's intent is clear. After confirming, deliver a short verbal acknowledgment."""
+
+
+def _clean_schema_for_gemini(schema: Any) -> Any:
+    """
+    Recursively remove OpenAI-specific fields from a schema.
+
+    Removes:
+    - strict: OpenAI-specific structured output parameter
+    - additionalProperties: While JSON Schema standard, Gemini doesn't accept it
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a deep copy to avoid modifying the original
+    cleaned = copy.deepcopy(schema)
+
+    # Remove OpenAI-specific fields at this level
+    cleaned.pop("strict", None)
+    cleaned.pop("additionalProperties", None)
+
+    # Recursively clean nested objects
+    if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+        for key, value in cleaned["properties"].items():
+            if isinstance(value, dict):
+                cleaned["properties"][key] = _clean_schema_for_gemini(value)
+
+    if "items" in cleaned and isinstance(cleaned["items"], dict):
+        cleaned["items"] = _clean_schema_for_gemini(cleaned["items"])
+
+    if "definitions" in cleaned and isinstance(cleaned["definitions"], dict):
+        for key, value in cleaned["definitions"].items():
+            if isinstance(value, dict):
+                cleaned["definitions"][key] = _clean_schema_for_gemini(value)
+
+    return cleaned
 
 
 def _default_call_control_tools() -> List[Dict[str, Any]]:
@@ -237,10 +273,14 @@ class GeminiRealtimeClient:
                 # Convert OpenAI tool format to Gemini format
                 for tool in self.custom_tool_definitions:
                     if tool.get("type") == "function":
+                        # Clean parameters to remove OpenAI-specific fields
+                        parameters = tool.get("parameters", {})
+                        cleaned_parameters = _clean_schema_for_gemini(parameters)
+
                         func_def = {
                             "name": tool["name"],
                             "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {})
+                            "parameters": cleaned_parameters
                         }
                         tools.append(func_def)
 
