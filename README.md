@@ -244,7 +244,6 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 |---------------|-------------|---------------|
 | `AI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
 | `AI_VOICE` | Voice selection (vendor-agnostic, see options above) | Vendor default |
-| `GEMINI_VOICE` | Gemini-specific voice override (only used when `AI_VENDOR=gemini`) | Uses `AI_VOICE` if not set |
 | `AI_MODEL` | AI model to use (overrides environment variable) | Uses `AI_MODEL` env var |
 | `AI_TEMPERATURE` | Response creativity/randomness (0.0-2.0 for Gemini, 0.6-1.2 for OpenAI) | 0.8 |
 | `AI_MAX_OUTPUT_TOKENS` | Maximum tokens in response (may be ignored by some models) | "inf" |
