@@ -314,7 +314,7 @@ class GeminiRealtimeClient:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
-            # Wrap function declarations in the required tools format
+            # Build tools in the format Gemini expects: [{"function_declarations": [...]}]
             tools = None
             if function_declarations:
                 tools = [types.Tool(function_declarations=function_declarations)]
@@ -350,7 +350,7 @@ class GeminiRealtimeClient:
             self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
             self.running = True
 
-            tool_names = [t.get("name", "unknown") for t in function_declarations]
+            tool_names = [f.get("name", "unknown") for f in function_declarations]
             self.logger.info(
                 f"[FunctionCall] Configured Gemini tools: {tool_names}; voice={self.voice}"
             )
@@ -647,12 +647,8 @@ class GeminiRealtimeClient:
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=False
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
             self.logger.info(f"[FunctionCall] Sent function response for {name} (call_id={call_id})")
@@ -719,12 +715,8 @@ class GeminiRealtimeClient:
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=True
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
             self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})")
