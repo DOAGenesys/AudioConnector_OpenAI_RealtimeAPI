@@ -5,7 +5,7 @@ Supports multiple AI providers (OpenAI, Gemini) with a unified interface.
 """
 
 from typing import Optional
-from config import AI_PROVIDER, logger
+from config import logger
 
 
 def create_client(

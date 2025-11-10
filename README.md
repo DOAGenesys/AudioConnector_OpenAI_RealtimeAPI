@@ -163,6 +163,8 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 #### Step 3: Configure Environment Variables
 
+**Provider Selection (Required):**
+
 | Variable | Description | Example Value |
 |----------|-------------|---------------|
 | `AI_VENDOR` | AI provider to use (`openai` or `gemini`) | `openai` or `gemini` |

@@ -32,7 +32,6 @@ from gemini_client import GeminiRealtimeClient
 from utils import format_json, parse_iso8601_duration
 from genesys_actions import build_genesys_tool_context
 from mcp_tools import load_mcp_tool_context
-from config import AI_PROVIDER
 
 from collections import deque
 
