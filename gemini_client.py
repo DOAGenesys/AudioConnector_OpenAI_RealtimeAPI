@@ -284,7 +284,7 @@ class GeminiRealtimeClient:
                 http_options={'api_version': 'v1alpha'}
             )
 
-            # Build tool declarations for Gemini
+            # Build function declarations for Gemini
             function_declarations = []
 
             # Add call control tools
@@ -306,6 +306,12 @@ class GeminiRealtimeClient:
                             "parameters": cleaned_parameters
                         }
                         function_declarations.append(func_def)
+
+            # Wrap function declarations in tools structure (required by Gemini Live API)
+            # Format: [{"function_declarations": [...]}]
+            tools = None
+            if function_declarations:
+                tools = [{"function_declarations": function_declarations}]
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -350,7 +356,7 @@ class GeminiRealtimeClient:
             self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
             self.running = True
 
-            tool_names = [f.get("name", "unknown") for f in function_declarations]
+            tool_names = [t.get("name", "unknown") for t in function_declarations]
             self.logger.info(
                 f"[FunctionCall] Configured Gemini tools: {tool_names}; voice={self.voice}"
             )
@@ -453,6 +459,7 @@ class GeminiRealtimeClient:
                             # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz
                             try:
                                 pcm16_24k = message.data
+                                self.logger.debug(f"Received audio from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
 
                                 # Resample from 24kHz to 8kHz
                                 if AUDIO_LIBS_AVAILABLE:
@@ -468,10 +475,11 @@ class GeminiRealtimeClient:
 
                                 # Convert to PCMU
                                 pcmu_8k = encode_pcm16_to_pcmu(pcm16_8k)
+                                self.logger.debug(f"Converted and sending to Genesys: {len(pcmu_8k)} bytes (PCMU 8kHz)")
                                 on_audio_callback(pcmu_8k)
 
                             except Exception as audio_err:
-                                self.logger.error(f"Error processing audio from Gemini: {audio_err}")
+                                self.logger.error(f"Error processing audio from Gemini: {audio_err}", exc_info=True)
 
                         # Handle server content (turn completion, tool calls, etc.)
                         if message.server_content:
