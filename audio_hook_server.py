@@ -23,10 +23,11 @@ from config import (
 )
 
 from rate_limiter import RateLimiter
-from openai_client import OpenAIRealtimeClient
+from providers import create_client
 from utils import format_json, parse_iso8601_duration
 from genesys_actions import build_genesys_tool_context
 from mcp_tools import load_mcp_tool_context
+from config import AI_PROVIDER
 
 from collections import deque
 
@@ -407,13 +408,18 @@ class AudioHookServer:
             self.logger.debug("Customer data provided for personalization")
 
         try:
-            self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
+            # Create AI client using provider abstraction
+            self.openai_client = create_client(
+                provider=AI_PROVIDER,
+                session_id=self.session_id,
+                on_speech_started_callback=self.handle_speech_started
+            )
             self.openai_client.language = language
             self.openai_client.customer_data = customer_data
             # Wire callbacks for function-calling driven disconnects
             self.openai_client.on_end_call_request = self._on_end_call_request
             self.openai_client.on_handoff_request = self._on_handoff_request
-            self.logger.info("[FunctionCall] OpenAI callbacks wired: on_end_call_request and on_handoff_request")
+            self.logger.info(f"[FunctionCall] {AI_PROVIDER.upper()} callbacks wired: on_end_call_request and on_handoff_request")
             if self.genesys_tool_context:
                 self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
             await self.openai_client.connect(
@@ -428,7 +434,7 @@ class AudioHookServer:
                 tool_instructions=tool_instructions
             )
         except Exception as e:
-            self.logger.error(f"OpenAI connection failed: {e}")
+            self.logger.error(f"{AI_PROVIDER.upper()} connection failed: {e}")
             await self.disconnect_session(reason="error", info=str(e))
             return
 
