@@ -165,10 +165,6 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 **Provider Selection (Required):**
 
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `AI_PROVIDER` | AI provider to use | `openai` | `openai` or `gemini` |
-
 | Variable | Description | Example Value |
 |----------|-------------|---------------|
 | `AI_VENDOR` | AI provider to use (`openai` or `gemini`) | `openai` or `gemini` |
