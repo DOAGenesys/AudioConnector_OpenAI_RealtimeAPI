@@ -251,6 +251,8 @@ class GeminiRealtimeClient:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
+            # Configure VAD settings optimized for phone audio
+            # Lower sensitivity helps with phone line noise and quality variations
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 system_instruction=instructions_text,
@@ -259,6 +261,14 @@ class GeminiRealtimeClient:
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
                             voice_name=self.voice
                         )
+                    )
+                ),
+                realtime_input_config=types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(
+                        disabled=False,
+                        # Use higher thresholds for phone audio to reduce false positives
+                        end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                        silence_duration_ms=800  # Wait 800ms of silence before considering speech ended
                     )
                 ),
                 tools=tools if tools else None,
@@ -309,7 +319,8 @@ class GeminiRealtimeClient:
                 # Simple duplication for 8kHz -> 16kHz (not ideal but works)
                 pcm16_16k = pcm16_8k + pcm16_8k
 
-            self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
+            if DEBUG == 'true':
+                self.logger.debug(f"[Audio] Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
 
             # Send as realtime input
             await self.session.send_realtime_input(
@@ -321,13 +332,15 @@ class GeminiRealtimeClient:
             self._has_audio_in_buffer = True
 
         except Exception as e:
-            self.logger.error(f"Error sending audio to Gemini: {e}")
+            self.logger.error(f"[Audio] Error sending audio to Gemini: {e}", exc_info=True)
 
     async def start_receiving(self, on_audio_callback):
         """Start receiving responses from Gemini."""
         if not self.running or not self.session:
             self.logger.warning(f"Cannot start receiving: running={self.running}, session={self.session is not None}")
             return
+
+        self.logger.info("[Audio] Starting to receive messages from Gemini Live API")
 
         async def _read_loop():
             try:
@@ -344,6 +357,7 @@ class GeminiRealtimeClient:
                             # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz
                             try:
                                 pcm16_24k = message.data
+                                self.logger.info(f"[Audio] Received audio chunk from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
 
                                 # Resample from 24kHz to 8kHz
                                 if AUDIO_LIBS_AVAILABLE:
@@ -359,14 +373,19 @@ class GeminiRealtimeClient:
 
                                 # Convert to PCMU
                                 pcmu_8k = encode_pcm16_to_pcmu(pcm16_8k)
+                                self.logger.debug(f"[Audio] Converted to PCMU 8kHz: {len(pcmu_8k)} bytes, sending to callback")
                                 on_audio_callback(pcmu_8k)
 
                             except Exception as audio_err:
-                                self.logger.error(f"Error processing audio from Gemini: {audio_err}")
+                                self.logger.error(f"[Audio] Error processing audio from Gemini: {audio_err}", exc_info=True)
 
                         # Handle server content (turn completion, tool calls, etc.)
                         if message.server_content:
                             server_content = message.server_content
+
+                            # Handle interruptions
+                            if hasattr(server_content, 'interrupted') and server_content.interrupted:
+                                self.logger.info("[Audio] Generation interrupted by VAD (user started speaking)")
 
                             # Track tokens
                             if message.usage_metadata:
@@ -375,7 +394,7 @@ class GeminiRealtimeClient:
                             # Handle turn complete
                             if server_content.turn_complete:
                                 self._response_in_progress = False
-                                self.logger.info("[FunctionCall] Turn complete from Gemini")
+                                self.logger.info("[Audio] Turn complete from Gemini")
 
                                 # Check if we need to disconnect
                                 if self._await_disconnect_on_done and self._disconnect_context:
@@ -394,13 +413,54 @@ class GeminiRealtimeClient:
                                     except Exception as e:
                                         self.logger.error(f"[FunctionCall] Exception invoking disconnect callback: {e}", exc_info=True)
 
-                            # Handle model turn (contains function calls)
+                            # Handle input transcription (if enabled)
+                            if hasattr(server_content, 'input_transcription') and server_content.input_transcription:
+                                if hasattr(server_content.input_transcription, 'text'):
+                                    self.logger.info(f"[Transcription] Input: {server_content.input_transcription.text}")
+
+                            # Handle output transcription (if enabled)
+                            if hasattr(server_content, 'output_transcription') and server_content.output_transcription:
+                                if hasattr(server_content.output_transcription, 'text'):
+                                    self.logger.info(f"[Transcription] Output: {server_content.output_transcription.text}")
+
+                            # Handle model turn (contains function calls and potentially inline audio)
                             if server_content.model_turn:
                                 model_turn = server_content.model_turn
                                 self._response_in_progress = True
 
-                                # Process parts for function calls
+                                # Process parts for function calls and inline data
                                 for part in model_turn.parts:
+                                    # Handle inline audio data (alternative format)
+                                    if hasattr(part, 'inline_data') and part.inline_data:
+                                        inline_data = part.inline_data
+                                        if hasattr(inline_data, 'mime_type') and 'audio' in inline_data.mime_type.lower():
+                                            if hasattr(inline_data, 'data') and inline_data.data:
+                                                try:
+                                                    # Inline data is typically base64 encoded
+                                                    if isinstance(inline_data.data, str):
+                                                        audio_bytes = base64.b64decode(inline_data.data)
+                                                    else:
+                                                        audio_bytes = inline_data.data
+
+                                                    self.logger.info(f"[Audio] Received inline audio from Gemini: {len(audio_bytes)} bytes")
+                                                    # Process same as regular audio
+                                                    # Assuming it's PCM16 24kHz
+                                                    if AUDIO_LIBS_AVAILABLE:
+                                                        import numpy as np
+                                                        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                                                        audio_8k = librosa.resample(audio_array, orig_sr=24000, target_sr=8000)
+                                                        audio_8k_int16 = (audio_8k * 32768.0).astype(np.int16)
+                                                        pcm16_8k = audio_8k_int16.tobytes()
+                                                    else:
+                                                        samples = [audio_bytes[i:i+2] for i in range(0, len(audio_bytes), 6)]
+                                                        pcm16_8k = b''.join(samples)
+
+                                                    pcmu_8k = encode_pcm16_to_pcmu(pcm16_8k)
+                                                    on_audio_callback(pcmu_8k)
+                                                except Exception as inline_audio_err:
+                                                    self.logger.error(f"[Audio] Error processing inline audio: {inline_audio_err}", exc_info=True)
+
+                                    # Handle function calls
                                     if part.function_call:
                                         func_call = part.function_call
                                         name = func_call.name
@@ -426,20 +486,28 @@ class GeminiRealtimeClient:
     async def _update_token_metrics(self, usage_metadata):
         """Update token tracking from Gemini usage metadata."""
         try:
-            # Update totals
-            if hasattr(usage_metadata, 'total_token_count'):
+            if not usage_metadata:
+                return
+
+            # Update totals with defensive checks
+            if hasattr(usage_metadata, 'total_token_count') and usage_metadata.total_token_count is not None:
                 total = usage_metadata.total_token_count
-            if hasattr(usage_metadata, 'prompt_token_count'):
+
+            if hasattr(usage_metadata, 'prompt_token_count') and usage_metadata.prompt_token_count is not None:
                 self._total_prompt_tokens = usage_metadata.prompt_token_count
-            if hasattr(usage_metadata, 'candidates_token_count'):
+
+            if hasattr(usage_metadata, 'candidates_token_count') and usage_metadata.candidates_token_count is not None:
                 self._total_candidates_tokens = usage_metadata.candidates_token_count
 
             # Update detailed breakdown by modality
-            if hasattr(usage_metadata, 'response_tokens_details'):
+            if hasattr(usage_metadata, 'response_tokens_details') and usage_metadata.response_tokens_details:
                 for detail in usage_metadata.response_tokens_details:
                     if isinstance(detail, types.ModalityTokenCount):
                         modality = detail.modality
                         count = detail.token_count
+
+                        if count is None or modality is None:
+                            continue
 
                         # Map modality to our tracking
                         if modality == "TEXT":
@@ -450,13 +518,14 @@ class GeminiRealtimeClient:
             # For input tokens, we'll estimate based on prompt tokens
             # Gemini doesn't break down input by modality in the same way
             # We'll assume audio dominates for realtime voice
-            self._token_details['input_audio_tokens'] = self._total_prompt_tokens
+            if self._total_prompt_tokens is not None:
+                self._token_details['input_audio_tokens'] = self._total_prompt_tokens
 
             if DEBUG == 'true':
                 self.logger.debug(f"Token metrics updated: prompt={self._total_prompt_tokens}, candidates={self._total_candidates_tokens}")
 
         except Exception as e:
-            self.logger.error(f"Error updating token metrics: {e}")
+            self.logger.error(f"Error updating token metrics: {e}", exc_info=True)
 
     async def _handle_function_call(self, name: str, call_id: str, args: dict):
         """Handle function calls from Gemini."""
