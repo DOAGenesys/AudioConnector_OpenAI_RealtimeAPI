@@ -50,37 +50,42 @@ AI_VENDOR=openai  # Use OpenAI Realtime API (default)
 AI_VENDOR=gemini  # Use Google Gemini Live API
 ```
 
-### OpenAI Configuration
+### Common AI Settings (Vendor-Agnostic)
 
-When using `AI_VENDOR=openai`, configure these environment variables:
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `OPENAI_API_KEY` | Your OpenAI API key | Yes |
-| `OPENAI_MODEL` | Model to use (e.g., `gpt-realtime-mini`) | No (defaults to `gpt-realtime-mini`) |
-
-#### Available OpenAI Voice Options:
-
-- `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
-
-See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated voice availability.
-
-### Gemini Configuration
-
-When using `AI_VENDOR=gemini`, configure these environment variables:
+These settings work with both OpenAI and Gemini:
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `GEMINI_API_KEY` | Your Google AI API key | Yes |
-| `GEMINI_MODEL` | Model to use | No (defaults to `gemini-2.5-flash-native-audio-preview-09-2025`) |
+| `AI_MODEL` | AI model to use | No (defaults based on `AI_VENDOR`) |
+| `AI_VOICE` | Voice for speech synthesis | No (defaults based on `AI_VENDOR`) |
 
-#### Available Gemini Voice Options:
+**Default Models:**
+- OpenAI: `gpt-realtime-mini`, `gpt-realtime`
+- Gemini: `gemini-2.5-flash-native-audio-preview-09-2025`
 
-Gemini Live API automatically selects voices based on the language. You can specify voice names such as:
+**Default Voices:**
+- OpenAI: `sage` (options: `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`)
+- Gemini: `Kore` (options: `Kore`, `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`, and more)
 
-- `Kore` (default), `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`
+### Vendor-Specific Configuration
 
-See https://ai.google.dev/gemini-api/docs/live-guide#change-voice-and-language for voice details.
+#### OpenAI
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `OPENAI_API_KEY` | Your OpenAI API key | Yes (when `AI_VENDOR=openai`) |
+
+See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated OpenAI voice availability.
+
+#### Gemini
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `GEMINI_API_KEY` | Your Google AI API key | Yes (when `AI_VENDOR=gemini`) |
+
+Gemini Live API automatically selects voices based on the language.
+
+See https://ai.google.dev/gemini-api/docs/speech-generation#voices for the complete list of available Gemini voices.
 
 #### Genesys Data Action Environment Variables
 
@@ -169,8 +174,8 @@ These are the **required** environment variables you must set for the integratio
 
 | Variable | Description | Default Value |
 |----------|-------------|---------------|
-| `OPENAI_MODEL` | OpenAI model to use (when `AI_VENDOR=openai`) | `gpt-realtime-mini` |
-| `GEMINI_MODEL` | Gemini model to use (when `AI_VENDOR=gemini`) | `gemini-2.5-flash-native-audio-preview-09-2025` |
+| `AI_MODEL` | AI model to use (works with both vendors) | Vendor-specific default |
+| `AI_VOICE` | Voice for speech synthesis (works with both vendors) | Vendor-specific default |
 | `DEBUG` | Enable debug logging | `false` |
 
 **Important**:
@@ -228,11 +233,12 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 
 | Variable Name | Description | Default Value |
 |---------------|-------------|---------------|
-| `OPENAI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
-| `OPENAI_VOICE` | Voice selection (see vendor-specific options above) | "sage" (OpenAI) / "Kore" (Gemini) |
-| `OPENAI_MODEL` | AI model to use (overrides environment variable) | Uses `OPENAI_MODEL` or `GEMINI_MODEL` env var |
-| `OPENAI_TEMPERATURE` | Response creativity/randomness (0.0-2.0 for Gemini, 0.6-1.2 for OpenAI) | 0.8 |
-| `OPENAI_MAX_OUTPUT_TOKENS` | Maximum tokens in response (may be ignored by some models) | "inf" |
+| `AI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
+| `AI_VOICE` | Voice selection (vendor-agnostic, see options above) | Vendor default |
+| `GEMINI_VOICE` | Gemini-specific voice override (only used when `AI_VENDOR=gemini`) | Uses `AI_VOICE` if not set |
+| `AI_MODEL` | AI model to use (overrides environment variable) | Uses `AI_MODEL` env var |
+| `AI_TEMPERATURE` | Response creativity/randomness (0.0-2.0 for Gemini, 0.6-1.2 for OpenAI) | 0.8 |
+| `AI_MAX_OUTPUT_TOKENS` | Maximum tokens in response (may be ignored by some models) | "inf" |
 | `LANGUAGE` | Response language override | Not set |
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
@@ -240,6 +246,8 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
 | `DATA_ACTION_DESCRIPTIONS` | Pipe-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
 | `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
+
+**Legacy Variable Support:** For backward compatibility, the connector also supports the legacy `OPENAI_*` prefixed session variables (`OPENAI_SYSTEM_PROMPT`, `OPENAI_VOICE`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, `OPENAI_MAX_OUTPUT_TOKENS`). These will be automatically mapped to their `AI_*` equivalents.
 
 ### Output Variables (Connector → Architect)
 
@@ -259,7 +267,9 @@ These variables are returned when the session ends:
 | `ESCALATION_REASON` | Explanation captured from the `end_conversation_with_escalation` call |
 | `COMPLETION_SUMMARY` | Short summary provided via `end_conversation_successfully` |
 
-**Note:** Some variables (like `OPENAI_MODEL`) are available at both the environment variable level and the session variable level. If different conflicting values are configured, the Genesys session variable will always take precedence.
+**Note:** Some variables (like `AI_MODEL`) are available at both the environment variable level and the session variable level. If different conflicting values are configured, the Genesys session variable will always take precedence.
+
+**Gemini Voice Configuration:** When using Gemini, you can set `GEMINI_VOICE` in the session variables to override the default voice independently of `AI_VOICE`. This allows you to use different voices for OpenAI and Gemini without changing `AI_VOICE`.
 
 ## Function Calling for Autonomous Call Management
 
@@ -449,8 +459,10 @@ Metrics tracked:
 - Features: Affective dialogue, proactive audio, thinking capabilities
 
 #### Voice Options
-Gemini automatically selects appropriate voices based on language. Available voices:
-- `Kore` (default), `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`
+Gemini automatically selects appropriate voices based on language. Available voices include:
+- `Kore` (default), `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`, and many more
+
+See the complete list at: https://ai.google.dev/gemini-api/docs/speech-generation#voices
 
 ---
 

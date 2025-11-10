@@ -22,7 +22,8 @@ from config import (
     ENDING_TEMPERATURE,
     AI_VENDOR,
     GEMINI_API_KEY,
-    GEMINI_MODEL
+    AI_MODEL,
+    AI_VOICE
 )
 
 from rate_limiter import RateLimiter
@@ -348,11 +349,40 @@ class AudioHookServer:
         self.logger.info(f"Session opened. Negotiated media format: {chosen}")
 
         input_vars = msg["parameters"].get("inputVariables", {})
-        voice = input_vars.get("OPENAI_VOICE", "sage")
-        instructions = input_vars.get("OPENAI_SYSTEM_PROMPT", "You are a helpful assistant.")
-        temperature = input_vars.get("OPENAI_TEMPERATURE")
-        model = input_vars.get("OPENAI_MODEL")
-        max_output_tokens = input_vars.get("OPENAI_MAX_OUTPUT_TOKENS")
+
+        # Vendor-agnostic session variables (use AI_* naming)
+        voice = input_vars.get("AI_VOICE")
+        if not voice:
+            # Fallback to legacy OPENAI_VOICE for backward compatibility
+            voice = input_vars.get("OPENAI_VOICE")
+        if not voice:
+            voice = AI_VOICE  # Use default from config
+
+        # Support vendor-specific voice override for Gemini
+        gemini_voice = input_vars.get("GEMINI_VOICE")
+
+        instructions = input_vars.get("AI_SYSTEM_PROMPT")
+        if not instructions:
+            # Fallback to legacy OPENAI_SYSTEM_PROMPT for backward compatibility
+            instructions = input_vars.get("OPENAI_SYSTEM_PROMPT", "You are a helpful assistant.")
+
+        temperature = input_vars.get("AI_TEMPERATURE")
+        if not temperature:
+            # Fallback to legacy OPENAI_TEMPERATURE for backward compatibility
+            temperature = input_vars.get("OPENAI_TEMPERATURE")
+
+        model = input_vars.get("AI_MODEL")
+        if not model:
+            # Fallback to legacy OPENAI_MODEL for backward compatibility
+            model = input_vars.get("OPENAI_MODEL")
+        if not model:
+            model = AI_MODEL  # Use default from config
+
+        max_output_tokens = input_vars.get("AI_MAX_OUTPUT_TOKENS")
+        if not max_output_tokens:
+            # Fallback to legacy OPENAI_MAX_OUTPUT_TOKENS for backward compatibility
+            max_output_tokens = input_vars.get("OPENAI_MAX_OUTPUT_TOKENS")
+
         language = input_vars.get("LANGUAGE")
         customer_data = input_vars.get("CUSTOMER_DATA")
         agent_name = input_vars.get("AGENT_NAME", DEFAULT_AGENT_NAME)
@@ -428,14 +458,14 @@ class AudioHookServer:
                 if self.genesys_tool_context:
                     self.openai_client.register_genesys_tool_handlers(self.genesys_tool_context.handlers)
 
-                # Use Gemini model if specified in session variables, otherwise use default
-                gemini_model = model if model else GEMINI_MODEL
+                # Use GEMINI_VOICE if provided, otherwise use AI_VOICE
+                final_voice = gemini_voice if gemini_voice else voice
 
                 await self.openai_client.connect(
                     instructions=instructions,
-                    voice=voice,
+                    voice=final_voice,
                     temperature=temperature,
-                    model=gemini_model,
+                    model=model,
                     max_output_tokens=max_output_tokens,
                     agent_name=agent_name,
                     company_name=company_name,

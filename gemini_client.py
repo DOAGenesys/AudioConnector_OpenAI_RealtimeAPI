@@ -219,8 +219,11 @@ class GeminiRealtimeClient:
             self.logger.info(f"Connecting to Gemini Live API using model: {self.model}...")
             connect_start = time.time()
 
-            # Initialize Gemini client
-            self.client = genai.Client(api_key=self.api_key)
+            # Initialize Gemini client with v1alpha API version
+            self.client = genai.Client(
+                api_key=self.api_key,
+                http_options={'api_version': 'v1alpha'}
+            )
 
             # Build tool declarations for Gemini
             tools = []
