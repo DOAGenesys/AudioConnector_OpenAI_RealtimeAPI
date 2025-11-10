@@ -87,6 +87,14 @@ DEFAULT_COMPANY_NAME = os.getenv('COMPANY_NAME', 'Our Company')
 # OpenAI-specific settings
 OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={AI_MODEL}"
 
+# Gemini-specific settings
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-native-audio-preview-09-2025')
+GEMINI_BASE_URL = os.getenv('GEMINI_BASE_URL', 'generativelanguage.googleapis.com')
+GEMINI_API_VERSION = os.getenv('GEMINI_API_VERSION', 'v1alpha')
+
+# Legacy compatibility
+AI_PROVIDER = AI_VENDOR  # Alias for backward compatibility
+
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MAX_OUTPUT_TOKENS = "inf"
 
@@ -206,7 +214,11 @@ logging.basicConfig(
 logger = logging.getLogger("GenesysOpenAIBridge")
 logger.setLevel(root_log_level)
 
-# Suppress verbose third-party library logs when not in DEBUG mode
+# Suppress verbose numba logging (used by librosa for JIT compilation)
+# Numba generates excessive debug output that clutters logs
+numba_logger = logging.getLogger('numba')
+numba_logger.setLevel(logging.ERROR)
+
 if DEBUG != 'true':
     # Suppress numba debug logs
     logging.getLogger('numba').setLevel(logging.WARNING)

@@ -7,8 +7,14 @@ import io
 import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError as e:
+    raise ImportError(
+        "Google Generative AI SDK is not installed. "
+        "Please install it with: pip install google-generativeai"
+    ) from e
 
 from config import (
     logger,
@@ -17,15 +23,14 @@ from config import (
     DEBUG,
     GENESYS_RATE_WINDOW
 )
-from utils import format_json, create_final_system_prompt, decode_pcmu_to_pcm16, encode_pcm16_to_pcmu
-
-try:
-    import librosa
-    import soundfile as sf
-    AUDIO_LIBS_AVAILABLE = True
-except ImportError:
-    AUDIO_LIBS_AVAILABLE = False
-    logger.warning("librosa or soundfile not available. Audio resampling will use basic conversion.")
+from utils import (
+    format_json,
+    create_final_system_prompt,
+    pcmu_8k_to_pcm16_16k,
+    pcm16_24k_to_pcmu_8k,
+    resample_audio,
+    decode_pcmu_to_pcm16
+)
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
@@ -247,9 +252,30 @@ class GeminiRealtimeClient:
             company_name=self.company_name
         )
 
-        # Map voice names from OpenAI to Gemini (Gemini auto-selects voice based on language)
-        # For now, we'll use the default voice, but this can be extended
-        self.voice = voice if voice and voice.strip() else "Kore"
+        # Map voice names from OpenAI to Gemini
+        # Gemini voices: Puck, Charon, Kore, Fenrir, Aoede
+        voice_mapping = {
+            "alloy": "Puck",
+            "ash": "Charon",
+            "ballad": "Aoede",
+            "coral": "Kore",
+            "echo": "Puck",
+            "sage": "Fenrir",
+            "shimmer": "Aoede",
+            "verse": "Charon"
+        }
+
+        # Validate and map voice
+        if voice and voice.strip():
+            # Check if it's already a Gemini voice
+            gemini_voices = ["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
+            if voice in gemini_voices:
+                self.voice = voice
+            else:
+                # Map from OpenAI voice names
+                self.voice = voice_mapping.get(voice, "Kore")
+        else:
+            self.voice = "Kore"
 
         try:
             self.temperature = float(temperature) if temperature else DEFAULT_TEMPERATURE
@@ -320,27 +346,28 @@ class GeminiRealtimeClient:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
-            # Build tools in the format Gemini expects: [{"function_declarations": [...]}]
-            tools = None
-            if function_declarations:
-                tools = [types.Tool(function_declarations=function_declarations)]
-
-            config = types.LiveConnectConfig(
+            # Build generation config with temperature
+            generation_config = types.GenerateContentConfig(
+                temperature=self.temperature,
                 response_modalities=["AUDIO"],
-                system_instruction=instructions_text,
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
                             voice_name=self.voice
                         )
                     )
-                ),
-                tools=tools,
+                )
             )
 
-            # Connect to Live API using async context manager
-            # Create the context manager
-            session_cm = self.client.aio.live.connect(
+            config = types.LiveConnectConfig(
+                generation_config=generation_config,
+                system_instruction=instructions_text,
+                tools=tools if tools else None,
+            )
+
+            # Connect to Live API
+            self.logger.info(f"Initiating Gemini Live API connection with model: {self.model}")
+            self.session = await self.client.aio.live.connect(
                 model=self.model,
                 config=config
             )
@@ -353,20 +380,24 @@ class GeminiRealtimeClient:
             self._session_context = session_cm
 
             connect_time = time.time() - connect_start
-            self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
+            self.logger.info(
+                f"Gemini Live API connection established in {connect_time:.2f}s "
+                f"(model={self.model}, voice={self.voice}, temperature={self.temperature})"
+            )
             self.running = True
 
             tool_names = [t.get("name", "unknown") for t in function_declarations]
             self.logger.info(
-                f"[FunctionCall] Configured Gemini tools: {tool_names}; voice={self.voice}"
+                f"[FunctionCall] Configured {len(tools)} Gemini tools: {tool_names}"
             )
 
             self.retry_count = 0
 
         except Exception as e:
-            self.logger.error(f"Error establishing Gemini connection: {e}")
+            self.logger.error(f"Error establishing Gemini connection: {e}", exc_info=True)
+            self.logger.error(f"Model: {self.model}, Voice: {self.voice}, Temperature: {self.temperature}")
             await self.close()
-            raise RuntimeError(f"Failed to connect to Gemini: {str(e)}")
+            raise RuntimeError(f"Failed to connect to Gemini Live API: {str(e)}")
 
     async def _safe_send(self, message: str):
         """
@@ -402,27 +433,15 @@ class GeminiRealtimeClient:
                 self.logger.error(f"Error in _safe_send: {e}")
 
     async def send_audio(self, pcmu_8k: bytes):
-        """Send audio to Gemini (convert PCMU to PCM16 16kHz)."""
+        """Send audio to Gemini (convert PCMU 8kHz to PCM16 16kHz)."""
         if not self.running or self.session is None:
             if DEBUG == 'true':
                 self.logger.warning(f"Dropping audio frame: running={self.running}, session={self.session is not None}")
             return
 
         try:
-            # Convert PCMU 8kHz to PCM16
-            pcm16_8k = decode_pcmu_to_pcm16(pcmu_8k)
-
-            # Resample from 8kHz to 16kHz if audio libs available
-            if AUDIO_LIBS_AVAILABLE:
-                # Use librosa to resample
-                import numpy as np
-                audio_array = np.frombuffer(pcm16_8k, dtype=np.int16).astype(np.float32) / 32768.0
-                audio_16k = librosa.resample(audio_array, orig_sr=8000, target_sr=16000)
-                audio_16k_int16 = (audio_16k * 32768.0).astype(np.int16)
-                pcm16_16k = audio_16k_int16.tobytes()
-            else:
-                # Simple duplication for 8kHz -> 16kHz (not ideal but works)
-                pcm16_16k = pcm16_8k + pcm16_8k
+            # Convert PCMU 8kHz (Genesys) to PCM16 16kHz (Gemini) using efficient audioop
+            pcm16_16k = pcmu_8k_to_pcm16_16k(pcmu_8k)
 
             self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
 
@@ -456,26 +475,13 @@ class GeminiRealtimeClient:
 
                         # Handle audio data
                         if message.data is not None:
-                            # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz
+                            # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz (Genesys)
                             try:
                                 pcm16_24k = message.data
                                 self.logger.debug(f"Received audio from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
 
-                                # Resample from 24kHz to 8kHz
-                                if AUDIO_LIBS_AVAILABLE:
-                                    import numpy as np
-                                    audio_array = np.frombuffer(pcm16_24k, dtype=np.int16).astype(np.float32) / 32768.0
-                                    audio_8k = librosa.resample(audio_array, orig_sr=24000, target_sr=8000)
-                                    audio_8k_int16 = (audio_8k * 32768.0).astype(np.int16)
-                                    pcm16_8k = audio_8k_int16.tobytes()
-                                else:
-                                    # Simple decimation (take every 3rd sample)
-                                    samples = [pcm16_24k[i:i+2] for i in range(0, len(pcm16_24k), 6)]
-                                    pcm16_8k = b''.join(samples)
-
-                                # Convert to PCMU
-                                pcmu_8k = encode_pcm16_to_pcmu(pcm16_8k)
-                                self.logger.debug(f"Converted and sending to Genesys: {len(pcmu_8k)} bytes (PCMU 8kHz)")
+                                # Convert PCM16 24kHz to PCMU 8kHz using efficient audioop
+                                pcmu_8k = pcm16_24k_to_pcmu_8k(pcm16_24k)
                                 on_audio_callback(pcmu_8k)
 
                             except Exception as audio_err:
@@ -551,10 +557,9 @@ class GeminiRealtimeClient:
           most tokens are audio tokens (input: 1 token/100ms, output: 1 token/50ms)
         """
         try:
-            # Get token counts for this turn
-            prompt_tokens_this_turn = 0
-            candidates_tokens_this_turn = 0
-
+            # Update totals (these are cumulative from Gemini)
+            if hasattr(usage_metadata, 'total_token_count'):
+                total = usage_metadata.total_token_count
             if hasattr(usage_metadata, 'prompt_token_count'):
                 prompt_tokens_this_turn = usage_metadata.prompt_token_count
                 self._total_prompt_tokens = prompt_tokens_this_turn
@@ -568,31 +573,37 @@ class GeminiRealtimeClient:
             if prompt_tokens_this_turn > 0:
                 self._token_details['input_audio_tokens'] += prompt_tokens_this_turn
 
-            # Accumulate output tokens from this turn
-            # Check if response_tokens_details is available for modality breakdown
-            if hasattr(usage_metadata, 'response_tokens_details'):
-                for detail in usage_metadata.response_tokens_details:
-                    if isinstance(detail, types.ModalityTokenCount):
-                        modality = detail.modality
-                        count = detail.token_count
+            # Update detailed breakdown by modality (cumulative values from Gemini)
+            if hasattr(usage_metadata, 'prompt_token_count_details'):
+                details = usage_metadata.prompt_token_count_details
+                if hasattr(details, 'audio_tokens'):
+                    self._token_details['input_audio_tokens'] = details.audio_tokens
+                if hasattr(details, 'text_tokens'):
+                    self._token_details['input_text_tokens'] = details.text_tokens
+                if hasattr(details, 'cached_content_token_count'):
+                    self._token_details['input_cached_audio_tokens'] = details.cached_content_token_count
 
-                        # Map modality to our tracking (accumulate)
-                        if modality == "TEXT":
-                            self._token_details['output_text_tokens'] += count
-                        elif modality == "AUDIO":
-                            self._token_details['output_audio_tokens'] += count
-            else:
-                # If no modality breakdown, assume all output is audio for Live API
-                if candidates_tokens_this_turn > 0:
-                    self._token_details['output_audio_tokens'] += candidates_tokens_this_turn
+            if hasattr(usage_metadata, 'candidates_token_count_details'):
+                details = usage_metadata.candidates_token_count_details
+                if hasattr(details, 'audio_tokens'):
+                    self._token_details['output_audio_tokens'] = details.audio_tokens
+                if hasattr(details, 'text_tokens'):
+                    self._token_details['output_text_tokens'] = details.text_tokens
+
+            # Legacy fallback: If no detailed breakdown, estimate based on totals
+            # For realtime audio conversations, most tokens are audio
+            if self._token_details['input_audio_tokens'] == 0 and self._total_prompt_tokens > 0:
+                self._token_details['input_audio_tokens'] = self._total_prompt_tokens
+
+            if self._token_details['output_audio_tokens'] == 0 and self._total_candidates_tokens > 0:
+                self._token_details['output_audio_tokens'] = self._total_candidates_tokens
 
             if DEBUG == 'true':
                 self.logger.debug(
-                    f"Token metrics updated - This turn: prompt={prompt_tokens_this_turn}, "
-                    f"candidates={candidates_tokens_this_turn} | "
-                    f"Cumulative: input_audio={self._token_details['input_audio_tokens']}, "
-                    f"output_audio={self._token_details['output_audio_tokens']}, "
-                    f"output_text={self._token_details['output_text_tokens']}"
+                    f"Token metrics updated: prompt={self._total_prompt_tokens}, "
+                    f"candidates={self._total_candidates_tokens}, "
+                    f"input_audio={self._token_details['input_audio_tokens']}, "
+                    f"output_audio={self._token_details['output_audio_tokens']}"
                 )
 
         except Exception as e:
