@@ -354,6 +354,8 @@ class AudioHookServer:
         agent_name = input_vars.get("AGENT_NAME", DEFAULT_AGENT_NAME)
         company_name = next((value for key, value in input_vars.items()
                             if key.strip() == "COMPANY_NAME"), DEFAULT_COMPANY_NAME)
+        escalation_prompt = input_vars.get("ESCALATION_PROMPT")
+        success_prompt = input_vars.get("SUCCESS_PROMPT")
 
         try:
             self.genesys_tool_context = await build_genesys_tool_context(self.logger, input_vars)
@@ -405,11 +407,17 @@ class AudioHookServer:
             self.logger.info(f"Enforcing language: {language}")
         if customer_data:
             self.logger.debug("Customer data provided for personalization")
+        if escalation_prompt:
+            self.logger.info(f"Using custom ESCALATION_PROMPT: {escalation_prompt}")
+        if success_prompt:
+            self.logger.info(f"Using custom SUCCESS_PROMPT: {success_prompt}")
 
         try:
             self.openai_client = OpenAIRealtimeClient(self.session_id, on_speech_started_callback=self.handle_speech_started)
             self.openai_client.language = language
             self.openai_client.customer_data = customer_data
+            self.openai_client.escalation_prompt = escalation_prompt
+            self.openai_client.success_prompt = success_prompt
             # Wire callbacks for function-calling driven disconnects
             self.openai_client.on_end_call_request = self._on_end_call_request
             self.openai_client.on_handoff_request = self._on_handoff_request
