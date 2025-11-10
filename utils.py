@@ -1,6 +1,7 @@
 import json
 import audioop
 import re
+import array
 
 from config import (
     MASTER_SYSTEM_PROMPT,
@@ -234,6 +235,50 @@ def decode_pcmu_to_pcm16(ulaw_bytes: bytes) -> bytes:
 
 def encode_pcm16_to_pcmu(pcm16_bytes: bytes) -> bytes:
     return audioop.lin2ulaw(pcm16_bytes, 2)
+
+def resample_audio(audio_bytes: bytes, from_rate: int, to_rate: int, sample_width: int = 2) -> bytes:
+    """
+    Resample audio from one sample rate to another.
+
+    :param audio_bytes: Input audio data
+    :param from_rate: Source sample rate (Hz)
+    :param to_rate: Target sample rate (Hz)
+    :param sample_width: Sample width in bytes (default: 2 for PCM16)
+    :return: Resampled audio bytes
+    """
+    if from_rate == to_rate:
+        return audio_bytes
+    return audioop.ratecv(audio_bytes, sample_width, 1, from_rate, to_rate, None)[0]
+
+def pcmu_8k_to_pcm16_16k(pcmu_8k_bytes: bytes) -> bytes:
+    """
+    Convert PCMU 8kHz (Genesys format) to PCM16 16kHz (Gemini input format).
+
+    :param pcmu_8k_bytes: PCMU audio at 8kHz
+    :return: PCM16 audio at 16kHz
+    """
+    # Step 1: Decode PCMU to PCM16 @ 8kHz
+    pcm16_8k = decode_pcmu_to_pcm16(pcmu_8k_bytes)
+
+    # Step 2: Resample from 8kHz to 16kHz
+    pcm16_16k = resample_audio(pcm16_8k, 8000, 16000, 2)
+
+    return pcm16_16k
+
+def pcm16_24k_to_pcmu_8k(pcm16_24k_bytes: bytes) -> bytes:
+    """
+    Convert PCM16 24kHz (Gemini output format) to PCMU 8kHz (Genesys format).
+
+    :param pcm16_24k_bytes: PCM16 audio at 24kHz
+    :return: PCMU audio at 8kHz
+    """
+    # Step 1: Resample from 24kHz to 8kHz
+    pcm16_8k = resample_audio(pcm16_24k_bytes, 24000, 8000, 2)
+
+    # Step 2: Encode PCM16 to PCMU
+    pcmu_8k = encode_pcm16_to_pcmu(pcm16_8k)
+
+    return pcmu_8k
 
 def format_json(obj: dict) -> str:
     return json.dumps(obj, indent=2)

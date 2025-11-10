@@ -1,54 +1,107 @@
-# Genesys & OpenAI Real-Time Voice Connector
+# Genesys Cloud Real-Time Voice Connector
 
-A real-time voice connector that bridges Genesys Cloud Audio Connector with OpenAI's Real-Time API, enabling intelligent voice agent assisted interactions with live phone calls through speech-to-speech processing.
+A real-time voice connector that bridges Genesys Cloud Audio Connector with leading AI providers (OpenAI Realtime API and Google Gemini Live API), enabling intelligent voice agent assisted interactions with live phone calls through speech-to-speech processing.
 
 ## Overview
 
-This application serves as a WebSocket middleware that captures audio from Genesys Cloud phone calls, processes it through OpenAI's Real-Time API, and streams intelligent responses back to callers in real-time. Designed for cloud deployment on platforms like DigitalOcean App Platform.
+This application serves as a WebSocket middleware that captures audio from Genesys Cloud phone calls, processes it through your choice of AI provider (OpenAI Realtime API or Google Gemini Live API), and streams intelligent responses back to callers in real-time. Designed for cloud deployment on platforms like DigitalOcean App Platform.
+
+### Supported AI Providers
+
+- **OpenAI Realtime API** - GPT-4 Realtime models with advanced reasoning and natural conversation
+- **Google Gemini Live API** - Gemini 2.5 Flash with native audio processing and multimodal capabilities
+
+Both providers offer full feature parity including real-time audio streaming, Voice Activity Detection (VAD), function calling, and session management. Switch between providers seamlessly using a single environment variable.
 
 ## Features
 
-- **Real-Time Speech Processing**: Direct speech-to-speech communication using OpenAI's Real-Time API without traditional STT/TTS pipeline
+- **Multi-Provider Support**: Choose between OpenAI Realtime API and Google Gemini Live API with identical features
+- **Real-Time Speech Processing**: Direct speech-to-speech communication without traditional STT/TTS pipeline
 - **Dynamic AI Configuration**: Customize AI behavior through Genesys Architect variables (system prompt, model, voice, temperature)
 - **Intelligent Conversation Management**: Context-aware responses with built-in Voice Activity Detection (VAD) for natural conversation flow
 - **Long Response Support**: Adaptive audio buffering handles 3-minute continuous AI responses without truncation—perfect for detailed explanations, complex lookups, and multi-step function calls
-- **Autonomous Call Termination**: AI can autonomously end calls when users indicate they're done or request human escalation using OpenAI function calling
-- **Genesys Data Actions**: Dynamically expose approved Genesys Cloud Data Actions as OpenAI tools so the voice agent can run secure CRM/data lookups in real time
+- **Autonomous Call Termination**: AI can autonomously end calls when users indicate they're done or request human escalation using function calling
+- **Genesys Data Actions**: Dynamically expose approved Genesys Cloud Data Actions as tools so the voice agent can run secure CRM/data lookups in real time
 - **Robust Error Handling**: Rate limiting and exponential backoff for stable API interaction
 - **Cloud-Ready Architecture**: Optimized for modern cloud platforms with automated SSL and scaling support
 
 ## How It Works
 
 1. **Connection Establishment**: Genesys Cloud AudioHook initiates WebSocket connection to the server
-2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format
-3. **AI Processing**: Audio forwarded to OpenAI Real-Time API using specified model (e.g., gpt-realtime-mini)
-4. **Response Generation**: OpenAI processes audio and generates synthesized voice response
-5. **Audio Playback**: Synthesized audio streams back through Genesys to caller
+2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format (8kHz)
+3. **AI Processing**: Audio forwarded to selected AI provider (OpenAI or Gemini) with automatic format conversion
+4. **Response Generation**: AI processes audio and generates synthesized voice response
+5. **Audio Playback**: Synthesized audio streams back through Genesys to caller (automatically converted to PCMU 8kHz)
 6. **Autonomous Call Management**: When appropriate, AI invokes call-control functions (`end_conversation_successfully` or `end_conversation_with_escalation`) and generates a farewell message
 7. **Graceful Disconnect**: After farewell audio completes and buffer drains, connector sends disconnect message to Genesys with session outcome data (escalation status, completion summary, token metrics)
 8. **Architect Flow Routing**: Architect uses output variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`) to route the call appropriately (queue transfer, wrap-up, etc.)
+
+### Audio Format Handling
+
+The connector automatically handles audio format conversion for both providers:
+- **Genesys**: PCMU (μ-law) @ 8kHz
+- **OpenAI**: PCMU @ 8kHz (native support, no conversion needed)
+- **Gemini**: PCM16 @ 16kHz input, PCM16 @ 24kHz output (automatic conversion)
 
 ## Prerequisites
 
 - Python 3.9 or higher
 - Genesys Cloud account with AudioHook integration enabled
-- OpenAI API key with Real-Time API access
+- AI Provider API key:
+  - **OpenAI**: API key with Real-Time API access
+  - **Gemini**: Google AI Studio API key
 - Cloud deployment platform (DigitalOcean recommended)
 
 ## Configuration
 
-### Available OpenAI Voice Options:
+### AI Provider Selection
 
-- `alloy`
-- `ash`
-- `ballad`
-- `coral`
-- `echo`
-- `sage`
-- `shimmer`
-- `verse`
+Choose your AI provider by setting the `AI_PROVIDER` environment variable:
 
-See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated voice availability.
+```bash
+AI_PROVIDER=openai  # Use OpenAI Realtime API (default)
+AI_PROVIDER=gemini  # Use Google Gemini Live API
+```
+
+### OpenAI Configuration
+
+When using `AI_PROVIDER=openai`, configure these environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_API_KEY` | Your OpenAI API key | Required |
+| `OPENAI_MODEL` | Model to use | `gpt-realtime-mini` |
+| `OPENAI_VOICE` | Voice selection (see options below) | `sage` |
+
+**Available OpenAI Voice Options:**
+
+- `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
+
+See [OpenAI Voice Options](https://platform.openai.com/docs/guides/realtime-conversations#voice-options) for updated availability.
+
+### Gemini Configuration
+
+When using `AI_PROVIDER=gemini`, configure these environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GEMINI_API_KEY` | Your Google AI Studio API key | Required |
+| `GEMINI_MODEL` | Model to use | `gemini-2.5-flash-native-audio-preview-09-2025` |
+| `GEMINI_API_VERSION` | API version | `v1alpha` |
+
+**Voice Mapping for Gemini:**
+
+When using Gemini, voice selections are automatically mapped to Gemini's available voices:
+
+| OpenAI Voice | Gemini Voice |
+|--------------|--------------|
+| `alloy`, `echo` | Puck |
+| `ash`, `verse` | Charon |
+| `ballad`, `shimmer` | Aoede |
+| `coral` | Kore |
+| `sage` | Fenrir |
+
+You can still use `OPENAI_VOICE` session variable - the connector will automatically map to the appropriate Gemini voice.
 
 #### Genesys Data Action Environment Variables
 
@@ -119,30 +172,47 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 #### Step 3: Configure Environment Variables
 
-**Minimum Mandatory Environment Variables:**
+**Provider Selection (Required):**
 
-These are the **required** environment variables you must set for the integration to work:
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `AI_PROVIDER` | AI provider to use | `openai` | `openai` or `gemini` |
 
-| Variable | Description | Example Value |
-|----------|-------------|---------------|
-| `OPENAI_API_KEY` | Your OpenAI API key | `sk-...` |
-| `OPENAI_MODEL` | OpenAI model to use | `gpt-realtime` (recommended) |
-| `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Your generated API key |
-| `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Your OAuth client ID |
-| `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Your OAuth client secret |
-| `GENESYS_REGION` | Your Genesys Cloud region | `mypurecloud.com` |
+**For OpenAI Provider (`AI_PROVIDER=openai`):**
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `OPENAI_API_KEY` | Your OpenAI API key | Yes | - |
+| `OPENAI_MODEL` | OpenAI model to use | No | `gpt-realtime-mini` |
+| `OPENAI_VOICE` | Voice selection | No | `sage` |
+
+**For Gemini Provider (`AI_PROVIDER=gemini`):**
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `GEMINI_API_KEY` | Your Google AI Studio API key | Yes | - |
+| `GEMINI_MODEL` | Gemini model to use | No | `gemini-2.5-flash-native-audio-preview-09-2025` |
+| `GEMINI_API_VERSION` | Gemini API version | No | `v1alpha` |
+
+**Genesys Configuration (Required for both providers):**
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Yes |
+| `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Yes |
+| `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Yes |
+| `GENESYS_REGION` | Your Genesys Cloud region (e.g., `mypurecloud.com`) | Yes |
 
 **Optional Environment Variables:**
 
 | Variable | Description | Default Value |
 |----------|-------------|---------------|
-| `OPENAI_VOICE` | Voice selection for AI responses | `sage` |
 | `DEBUG` | Enable debug logging | `false` |
 
-**Important**: 
+**Important**:
 - Mark all sensitive variables (API keys, secrets) as **encrypted secrets** in DigitalOcean
-- `DEBUG` defaults to `false` if not set (production mode)
-- Use `gpt-realtime` as the model for optimal performance and cost
+- Only the API key for your selected provider is required (not both)
+- Voice selection uses `OPENAI_VOICE` session variable for both providers (auto-mapped for Gemini)
 
 #### Step 4: Deploy
 
@@ -337,3 +407,34 @@ DATA_ACTION_DESCRIPTIONS = Searches knowledge base articles to address general F
 - **Live Data Access** – Approved Genesys Data Actions are available as first-class tools without embedding credentials inside prompts.
 - **Flow-Level Insight** – New output variables expose escalation state and completion summaries for downstream routing.
 - **Governed Access** – Server-side allowlists, rate limits, and payload caps prevent runaway tool usage.
+
+## Switching Between AI Providers
+
+Switching between OpenAI and Gemini is seamless - simply change the `AI_PROVIDER` environment variable and configure the appropriate API key:
+
+### Example: Using OpenAI (Default)
+
+```bash
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-proj-xxxxx
+OPENAI_MODEL=gpt-realtime-mini
+# Voice configured in Architect flow (OPENAI_VOICE session variable)
+```
+
+### Example: Using Gemini
+
+```bash
+AI_PROVIDER=gemini
+GEMINI_API_KEY=AIzaSyxxxxx
+GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-09-2025
+# Voice configured in Architect flow (OPENAI_VOICE session variable, auto-mapped to Gemini)
+```
+
+**No Code Changes Required:** All other configuration (Genesys settings, data actions, MCP tools, session variables) remains identical. The connector automatically handles:
+- Audio format conversion (PCMU ↔ PCM16 with resampling)
+- Function calling format translation
+- Voice mapping
+- Session management
+- VAD event handling
+
+Your Architect flows work with both providers without modification.
