@@ -15,7 +15,7 @@ from config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEBUG,
-    OPENAI_MODEL,
+    AI_MODEL,
     GENESYS_RATE_WINDOW
 )
 from utils import format_json, create_final_system_prompt, is_websocket_open, get_websocket_connect_kwargs
@@ -233,7 +233,7 @@ class OpenAIRealtimeClient:
             logger.warning(f"Invalid temperature value: {temperature}. Using default: {DEFAULT_TEMPERATURE}")
             self.temperature = DEFAULT_TEMPERATURE
 
-        self.model = model if model else OPENAI_MODEL
+        self.model = model if model else AI_MODEL
         global OPENAI_REALTIME_URL
         OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={self.model}"
 

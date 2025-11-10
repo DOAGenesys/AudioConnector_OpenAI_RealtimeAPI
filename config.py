@@ -38,32 +38,43 @@ AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 # Server settings
 GENESYS_PATH = "/audiohook"
 
-# AI Provider Selection
-AI_PROVIDER = os.getenv('AI_PROVIDER', 'openai').lower()
-if AI_PROVIDER not in ('openai', 'gemini'):
-    raise ValueError(f"AI_PROVIDER must be 'openai' or 'gemini', got '{AI_PROVIDER}'")
+# AI Vendor selection (openai or gemini)
+AI_VENDOR = os.getenv('AI_VENDOR', 'openai').lower()
+if AI_VENDOR not in ('openai', 'gemini'):
+    raise ValueError(f"AI_VENDOR must be 'openai' or 'gemini', got '{AI_VENDOR}'")
 
-# OpenAI Realtime API settings
+# Vendor-specific API keys
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-OPENAI_MODEL = os.getenv('OPENAI_MODEL')
-if not OPENAI_MODEL:
-    OPENAI_MODEL = "gpt-realtime-mini"
-OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={OPENAI_MODEL}"
-
-# Gemini Live API settings
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-native-audio-preview-09-2025')
-GEMINI_BASE_URL = "generativelanguage.googleapis.com"
-GEMINI_API_VERSION = os.getenv('GEMINI_API_VERSION', 'v1alpha')
 
-# Validate provider-specific requirements
-if AI_PROVIDER == 'openai' and not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables when using OpenAI provider.")
-if AI_PROVIDER == 'gemini' and not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment variables when using Gemini provider.")
+# Validate that the appropriate API key is set for the selected vendor
+if AI_VENDOR == 'openai' and not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in environment variables but AI_VENDOR is set to 'openai'.")
+elif AI_VENDOR == 'gemini' and not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables but AI_VENDOR is set to 'gemini'.")
+
+# Common AI settings (vendor-agnostic)
+AI_MODEL = os.getenv('AI_MODEL')
+if not AI_MODEL:
+    # Set default based on vendor
+    if AI_VENDOR == 'openai':
+        AI_MODEL = "gpt-realtime-mini"
+    else:  # gemini
+        AI_MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
+
+AI_VOICE = os.getenv('AI_VOICE')
+if not AI_VOICE:
+    # Set default based on vendor
+    if AI_VENDOR == 'openai':
+        AI_VOICE = "sage"
+    else:  # gemini
+        AI_VOICE = "Kore"
 
 DEFAULT_AGENT_NAME = os.getenv('AGENT_NAME', 'AI Assistant')
 DEFAULT_COMPANY_NAME = os.getenv('COMPANY_NAME', 'Our Company')
+
+# OpenAI-specific settings
+OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={AI_MODEL}"
 
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MAX_OUTPUT_TOKENS = "inf"

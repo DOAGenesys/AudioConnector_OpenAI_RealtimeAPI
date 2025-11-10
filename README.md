@@ -1,37 +1,30 @@
-# Genesys Cloud Real-Time Voice Connector
+# Genesys Cloud Real-Time Voice AI Connector
 
 A real-time voice connector that bridges Genesys Cloud Audio Connector with leading AI providers (OpenAI Realtime API and Google Gemini Live API), enabling intelligent voice agent assisted interactions with live phone calls through speech-to-speech processing.
 
 ## Overview
 
-This application serves as a WebSocket middleware that captures audio from Genesys Cloud phone calls, processes it through your choice of AI provider (OpenAI Realtime API or Google Gemini Live API), and streams intelligent responses back to callers in real-time. Designed for cloud deployment on platforms like DigitalOcean App Platform.
-
-### Supported AI Providers
-
-- **OpenAI Realtime API** - GPT-4 Realtime models with advanced reasoning and natural conversation
-- **Google Gemini Live API** - Gemini 2.5 Flash with native audio processing and multimodal capabilities
-
-Both providers offer full feature parity including real-time audio streaming, Voice Activity Detection (VAD), function calling, and session management. Switch between providers seamlessly using a single environment variable.
+This application serves as a WebSocket middleware that captures audio from Genesys Cloud phone calls, processes it through your chosen AI vendor's real-time API (OpenAI or Gemini), and streams intelligent responses back to callers in real-time. Designed for cloud deployment on platforms like DigitalOcean App Platform.
 
 ## Features
 
-- **Multi-Provider Support**: Choose between OpenAI Realtime API and Google Gemini Live API with identical features
+- **Multi-Vendor AI Support**: Choose between OpenAI Realtime API and Google Gemini Live API based on your needs
 - **Real-Time Speech Processing**: Direct speech-to-speech communication without traditional STT/TTS pipeline
 - **Dynamic AI Configuration**: Customize AI behavior through Genesys Architect variables (system prompt, model, voice, temperature)
 - **Intelligent Conversation Management**: Context-aware responses with built-in Voice Activity Detection (VAD) for natural conversation flow
 - **Long Response Support**: Adaptive audio buffering handles 3-minute continuous AI responses without truncation—perfect for detailed explanations, complex lookups, and multi-step function calls
 - **Autonomous Call Termination**: AI can autonomously end calls when users indicate they're done or request human escalation using function calling
-- **Genesys Data Actions**: Dynamically expose approved Genesys Cloud Data Actions as tools so the voice agent can run secure CRM/data lookups in real time
+- **Genesys Data Actions**: Dynamically expose approved Genesys Cloud Data Actions as AI tools so the voice agent can run secure CRM/data lookups in real time
 - **Robust Error Handling**: Rate limiting and exponential backoff for stable API interaction
 - **Cloud-Ready Architecture**: Optimized for modern cloud platforms with automated SSL and scaling support
 
 ## How It Works
 
 1. **Connection Establishment**: Genesys Cloud AudioHook initiates WebSocket connection to the server
-2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format (8kHz)
-3. **AI Processing**: Audio forwarded to selected AI provider (OpenAI or Gemini) with automatic format conversion
-4. **Response Generation**: AI processes audio and generates synthesized voice response
-5. **Audio Playback**: Synthesized audio streams back through Genesys to caller (automatically converted to PCMU 8kHz)
+2. **Audio Streaming**: Real-time call audio streams in PCMU/ULAW format
+3. **AI Processing**: Audio forwarded to your selected AI vendor's real-time API (OpenAI or Gemini) using specified model
+4. **Response Generation**: AI vendor processes audio and generates synthesized voice response
+5. **Audio Playback**: Synthesized audio streams back through Genesys to caller
 6. **Autonomous Call Management**: When appropriate, AI invokes call-control functions (`end_conversation_successfully` or `end_conversation_with_escalation`) and generates a farewell message
 7. **Graceful Disconnect**: After farewell audio completes and buffer drains, connector sends disconnect message to Genesys with session outcome data (escalation status, completion summary, token metrics)
 8. **Architect Flow Routing**: Architect uses output variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`) to route the call appropriately (queue transfer, wrap-up, etc.)
@@ -47,61 +40,59 @@ The connector automatically handles audio format conversion for both providers:
 
 - Python 3.9 or higher
 - Genesys Cloud account with AudioHook integration enabled
-- AI Provider API key:
+- **One of the following AI vendor credentials:**
   - **OpenAI**: API key with Real-Time API access
-  - **Gemini**: Google AI Studio API key
+  - **Gemini**: Google AI API key with Gemini Live API access
 - Cloud deployment platform (DigitalOcean recommended)
 
 ## Configuration
 
-### AI Provider Selection
+### AI Vendor Selection
 
-Choose your AI provider by setting the `AI_PROVIDER` environment variable:
+The connector supports both OpenAI and Gemini AI vendors. Select your vendor using the `AI_VENDOR` environment variable:
 
 ```bash
-AI_PROVIDER=openai  # Use OpenAI Realtime API (default)
-AI_PROVIDER=gemini  # Use Google Gemini Live API
+AI_VENDOR=openai  # Use OpenAI Realtime API (default)
+# or
+AI_VENDOR=gemini  # Use Google Gemini Live API
 ```
 
-### OpenAI Configuration
+### Common AI Settings (Vendor-Agnostic)
 
-When using `AI_PROVIDER=openai`, configure these environment variables:
+These settings work with both OpenAI and Gemini:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | Your OpenAI API key | Required |
-| `OPENAI_MODEL` | Model to use | `gpt-realtime-mini` |
-| `OPENAI_VOICE` | Voice selection (see options below) | `sage` |
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `AI_MODEL` | AI model to use | No (defaults based on `AI_VENDOR`) |
+| `AI_VOICE` | Voice for speech synthesis | No (defaults based on `AI_VENDOR`) |
 
-**Available OpenAI Voice Options:**
+**Default Models:**
+- OpenAI: `gpt-realtime-mini`, `gpt-realtime`
+- Gemini: `gemini-2.5-flash-native-audio-preview-09-2025`
 
-- `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
+**Default Voices:**
+- OpenAI: `sage` (options: `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`)
+- Gemini: `Kore` (options: `Kore`, `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`, and more)
 
-See [OpenAI Voice Options](https://platform.openai.com/docs/guides/realtime-conversations#voice-options) for updated availability.
+### Vendor-Specific Configuration
 
-### Gemini Configuration
+#### OpenAI
 
-When using `AI_PROVIDER=gemini`, configure these environment variables:
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `OPENAI_API_KEY` | Your OpenAI API key | Yes (when `AI_VENDOR=openai`) |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GEMINI_API_KEY` | Your Google AI Studio API key | Required |
-| `GEMINI_MODEL` | Model to use | `gemini-2.5-flash-native-audio-preview-09-2025` |
-| `GEMINI_API_VERSION` | API version | `v1alpha` |
+See https://platform.openai.com/docs/guides/realtime-conversations#voice-options for updated OpenAI voice availability.
 
-**Voice Mapping for Gemini:**
+#### Gemini
 
-When using Gemini, voice selections are automatically mapped to Gemini's available voices:
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `GEMINI_API_KEY` | Your Google AI API key | Yes (when `AI_VENDOR=gemini`) |
 
-| OpenAI Voice | Gemini Voice |
-|--------------|--------------|
-| `alloy`, `echo` | Puck |
-| `ash`, `verse` | Charon |
-| `ballad`, `shimmer` | Aoede |
-| `coral` | Kore |
-| `sage` | Fenrir |
+Gemini Live API automatically selects voices based on the language.
 
-You can still use `OPENAI_VOICE` session variable - the connector will automatically map to the appropriate Gemini voice.
+See https://ai.google.dev/gemini-api/docs/speech-generation#voices for the complete list of available Gemini voices.
 
 #### Genesys Data Action Environment Variables
 
@@ -178,41 +169,29 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 |----------|-------------|---------|---------|
 | `AI_PROVIDER` | AI provider to use | `openai` | `openai` or `gemini` |
 
-**For OpenAI Provider (`AI_PROVIDER=openai`):**
-
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `OPENAI_API_KEY` | Your OpenAI API key | Yes | - |
-| `OPENAI_MODEL` | OpenAI model to use | No | `gpt-realtime-mini` |
-| `OPENAI_VOICE` | Voice selection | No | `sage` |
-
-**For Gemini Provider (`AI_PROVIDER=gemini`):**
-
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `GEMINI_API_KEY` | Your Google AI Studio API key | Yes | - |
-| `GEMINI_MODEL` | Gemini model to use | No | `gemini-2.5-flash-native-audio-preview-09-2025` |
-| `GEMINI_API_VERSION` | Gemini API version | No | `v1alpha` |
-
-**Genesys Configuration (Required for both providers):**
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Yes |
-| `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Yes |
-| `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Yes |
-| `GENESYS_REGION` | Your Genesys Cloud region (e.g., `mypurecloud.com`) | Yes |
+| Variable | Description | Example Value |
+|----------|-------------|---------------|
+| `AI_VENDOR` | AI provider to use (`openai` or `gemini`) | `openai` or `gemini` |
+| `OPENAI_API_KEY` | Your OpenAI API key (required if `AI_VENDOR=openai`) | `sk-...` |
+| `GEMINI_API_KEY` | Your Google AI API key (required if `AI_VENDOR=gemini`) | Your Gemini API key |
+| `GENESYS_API_KEY` | Shared secret from Genesys Audio Connector integration | Your generated API key |
+| `GENESYS_CLIENT_ID` | OAuth client ID for Genesys Cloud API access | Your OAuth client ID |
+| `GENESYS_CLIENT_SECRET` | OAuth client secret for Genesys Cloud API access | Your OAuth client secret |
+| `GENESYS_REGION` | Your Genesys Cloud region | `mypurecloud.com` |
 
 **Optional Environment Variables:**
 
 | Variable | Description | Default Value |
 |----------|-------------|---------------|
+| `AI_MODEL` | AI model to use (works with both vendors) | Vendor-specific default |
+| `AI_VOICE` | Voice for speech synthesis (works with both vendors) | Vendor-specific default |
 | `DEBUG` | Enable debug logging | `false` |
 
 **Important**:
 - Mark all sensitive variables (API keys, secrets) as **encrypted secrets** in DigitalOcean
-- Only the API key for your selected provider is required (not both)
-- Voice selection uses `OPENAI_VOICE` session variable for both providers (auto-mapped for Gemini)
+- `DEBUG` defaults to `false` if not set (production mode)
+- Set `AI_VENDOR` to choose between OpenAI and Gemini
+- Only the API key for your selected vendor is required
 
 #### Step 4: Deploy
 
@@ -263,18 +242,21 @@ Configure AI behavior by setting these variables before the Call Audio Connector
 
 | Variable Name | Description | Default Value |
 |---------------|-------------|---------------|
-| `OPENAI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
-| `OPENAI_VOICE` | Voice selection (see options above) | "sage" |
-| `OPENAI_MODEL` | OpenAI model to use | "gpt-realtime-mini" |
-| `OPENAI_TEMPERATURE` | Deprecated; ignored by GA Realtime API | — |
-| `OPENAI_MAX_OUTPUT_TOKENS` | Deprecated; ignored by GA Realtime API | — |
+| `AI_SYSTEM_PROMPT` | AI assistant instructions | "You are a helpful assistant." |
+| `AI_VOICE` | Voice selection (vendor-agnostic, see options above) | Vendor default |
+| `GEMINI_VOICE` | Gemini-specific voice override (only used when `AI_VENDOR=gemini`) | Uses `AI_VOICE` if not set |
+| `AI_MODEL` | AI model to use (overrides environment variable) | Uses `AI_MODEL` env var |
+| `AI_TEMPERATURE` | Response creativity/randomness (0.0-2.0 for Gemini, 0.6-1.2 for OpenAI) | 0.8 |
+| `AI_MAX_OUTPUT_TOKENS` | Maximum tokens in response (may be ignored by some models) | "inf" |
 | `LANGUAGE` | Response language override | Not set |
 | `CUSTOMER_DATA` | Personalization data (semicolon-separated key:value pairs) | Not set |
 | `AGENT_NAME` | AI assistant name for prompts | "AI Assistant" |
 | `COMPANY_NAME` | Company name for prompts | "Our Company" |
 | `DATA_ACTION_IDS` | Comma/pipe separated Genesys Data Action IDs to expose as realtime tools | Not set |
-| `DATA_ACTION_DESCRIPTIONS` |`-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
+| `DATA_ACTION_DESCRIPTIONS` | Pipe-delimited descriptions aligned with `DATA_ACTION_IDS` order | Not set |
 | `MCP_TOOLS_JSON` | JSON array (as a string) describing MCP/built-in tools to expose. Leave blank to disable. | Not set |
+
+**Legacy Variable Support:** For backward compatibility, the connector also supports the legacy `OPENAI_*` prefixed session variables (`OPENAI_SYSTEM_PROMPT`, `OPENAI_VOICE`, `OPENAI_MODEL`, `OPENAI_TEMPERATURE`, `OPENAI_MAX_OUTPUT_TOKENS`). These will be automatically mapped to their `AI_*` equivalents.
 
 ### Output Variables (Connector → Architect)
 
@@ -284,29 +266,31 @@ These variables are returned when the session ends:
 |---------------|-------------|
 | `CONVERSATION_SUMMARY` | JSON-structured call summary (topics, decisions, sentiment) |
 | `CONVERSATION_DURATION` | AudioHook session duration in seconds |
-| `TOTAL_INPUT_TEXT_TOKENS` | Text tokens sent to OpenAI |
-| `TOTAL_INPUT_CACHED_TEXT_TOKENS` | Cached text tokens sent to OpenAI |
-| `TOTAL_INPUT_AUDIO_TOKENS` | Audio tokens sent to OpenAI |
-| `TOTAL_INPUT_CACHED_AUDIO_TOKENS` | Cached audio tokens sent to OpenAI |
-| `TOTAL_OUTPUT_TEXT_TOKENS` | Text tokens received from OpenAI |
-| `TOTAL_OUTPUT_AUDIO_TOKENS` | Audio tokens received from OpenAI |
+| `TOTAL_INPUT_TEXT_TOKENS` | Text tokens sent to the AI vendor |
+| `TOTAL_INPUT_CACHED_TEXT_TOKENS` | Cached text tokens sent to the AI vendor |
+| `TOTAL_INPUT_AUDIO_TOKENS` | Audio tokens sent to the AI vendor |
+| `TOTAL_INPUT_CACHED_AUDIO_TOKENS` | Cached audio tokens sent to the AI vendor |
+| `TOTAL_OUTPUT_TEXT_TOKENS` | Text tokens received from the AI vendor |
+| `TOTAL_OUTPUT_AUDIO_TOKENS` | Audio tokens received from the AI vendor |
 | `ESCALATION_REQUIRED` | `true` when the agent requested a human handoff, else `false` |
 | `ESCALATION_REASON` | Explanation captured from the `end_conversation_with_escalation` call |
 | `COMPLETION_SUMMARY` | Short summary provided via `end_conversation_successfully` |
 
-Note: there are some variables, like OPENAI_MODEL, that are both available at the environment variable level and also at the session variable level. If different conflicting values are configured, the genesys session variable will always take precedence.
+**Note:** Some variables (like `AI_MODEL`) are available at both the environment variable level and the session variable level. If different conflicting values are configured, the Genesys session variable will always take precedence.
+
+**Gemini Voice Configuration:** When using Gemini, you can set `GEMINI_VOICE` in the session variables to override the default voice independently of `AI_VOICE`. This allows you to use different voices for OpenAI and Gemini without changing `AI_VOICE`.
 
 ## Function Calling for Autonomous Call Management
 
-The middleware now exposes both call-control functions and optional Genesys Cloud Data Action tools to the OpenAI Realtime model. This lets the voice agent terminate calls, escalate to humans, or fetch real customer data without bespoke IVR logic.
+The middleware exposes both call-control functions and optional Genesys Cloud Data Action tools to the AI model (OpenAI or Gemini). This lets the voice agent terminate calls, escalate to humans, or fetch real customer data without bespoke IVR logic.
 
 ### Call-Control Functions
 
 #### `end_conversation_successfully`
-Triggered when the caller confirms their request is complete. The model sends a short `summary` describing what was accomplished. The function result is fed back to OpenAI, which then generates a natural farewell message to the caller. Once this farewell audio completes playing, the connector waits for the audio buffer to fully drain (ensuring the caller hears the entire goodbye), then gracefully disconnects the AudioHook session with `ESCALATION_REQUIRED=false` and `COMPLETION_SUMMARY` containing the provided summary.
+Triggered when the caller confirms their request is complete. The model sends a short `summary` describing what was accomplished. The function result is fed back to the AI, which then generates a natural farewell message to the caller. Once this farewell audio completes playing, the connector waits for the audio buffer to fully drain (ensuring the caller hears the entire goodbye), then gracefully disconnects the AudioHook session with `ESCALATION_REQUIRED=false` and `COMPLETION_SUMMARY` containing the provided summary.
 
 #### `end_conversation_with_escalation`
-Triggered when the caller explicitly requests a human agent, shows frustration, or the task cannot be completed. The model passes a `reason` explaining why escalation is needed. The function result is sent back to OpenAI, which generates an appropriate transition message (e.g., "I'll connect you with an agent who can help"). After this message plays completely, the connector disconnects the AudioHook session with `ESCALATION_REQUIRED=true` and `ESCALATION_REASON` populated, allowing Architect to branch into a transfer queue or escalation flow.
+Triggered when the caller explicitly requests a human agent, shows frustration, or the task cannot be completed. The model passes a `reason` explaining why escalation is needed. The function result is sent back to the AI, which generates an appropriate transition message (e.g., "I'll connect you with an agent who can help"). After this message plays completely, the connector disconnects the AudioHook session with `ESCALATION_REQUIRED=true` and `ESCALATION_REASON` populated, allowing Architect to branch into a transfer queue or escalation flow.
 
 Both functions include clear instructions in the system prompt so the model knows exactly when to invoke them. The connector ensures all farewell audio is delivered to the caller before disconnecting, providing a smooth conversational conclusion.
 
@@ -408,33 +392,112 @@ DATA_ACTION_DESCRIPTIONS = Searches knowledge base articles to address general F
 - **Flow-Level Insight** – New output variables expose escalation state and completion summaries for downstream routing.
 - **Governed Access** – Server-side allowlists, rate limits, and payload caps prevent runaway tool usage.
 
-## Switching Between AI Providers
+---
 
-Switching between OpenAI and Gemini is seamless - simply change the `AI_PROVIDER` environment variable and configure the appropriate API key:
+## Technical Implementation Details
 
-### Example: Using OpenAI (Default)
+### OpenAI Realtime API Integration
 
-```bash
-AI_PROVIDER=openai
-OPENAI_API_KEY=sk-proj-xxxxx
-OPENAI_MODEL=gpt-realtime-mini
-# Voice configured in Architect flow (OPENAI_VOICE session variable)
+When `AI_VENDOR=openai`, the connector uses the OpenAI Realtime API with the following specifications:
+
+#### Audio Format
+- **Input**: PCMU/ULAW 8kHz (from Genesys) → converted internally by OpenAI
+- **Output**: PCMU/ULAW 8kHz (to Genesys) ← converted internally by OpenAI
+- **Connection**: WebSocket at `wss://api.openai.com/v1/realtime?model={model}`
+
+#### Token Counting (OpenAI)
+Token metrics are extracted from the `usage` field in OpenAI's `response.done` events:
+```python
+usage = response.get("usage", {})
+token_details = usage.get("input_token_details", {})
+output_details = usage.get("output_token_details", {})
 ```
 
-### Example: Using Gemini
+Metrics tracked:
+- **Input**: `text_tokens`, `audio_tokens` (with `cached_tokens_details` breakdown)
+- **Output**: `text_tokens`, `audio_tokens`
 
-```bash
-AI_PROVIDER=gemini
-GEMINI_API_KEY=AIzaSyxxxxx
-GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-09-2025
-# Voice configured in Architect flow (OPENAI_VOICE session variable, auto-mapped to Gemini)
+#### Function Calling (OpenAI)
+- Uses OpenAI's structured function calling format
+- Tools are registered in `session.update` with `type: "function"`
+- Function responses sent via `conversation.item.create` with `type: "function_call_output"`
+
+#### Model Options
+- `gpt-realtime-mini` (recommended for cost-efficiency)
+- `gpt-realtime` (higher capability)
+
+---
+
+### Google Gemini Live API Integration
+
+When `AI_VENDOR=gemini`, the connector uses the Gemini Live API with the following specifications:
+
+#### Audio Format
+- **Input**: PCMU 8kHz (from Genesys) → resampled to PCM16 16kHz → sent to Gemini
+- **Output**: PCM16 24kHz (from Gemini) → resampled to PCM16 8kHz → encoded to PCMU → sent to Genesys
+- **Resampling**: Uses `librosa` for high-quality audio resampling
+- **Connection**: WebSocket via `google.genai.Client().aio.live.connect()`
+
+#### Token Counting (Gemini)
+Token metrics are tracked from `usage_metadata` in Gemini's response messages:
+```python
+usage_metadata = message.usage_metadata
+prompt_tokens = usage_metadata.prompt_token_count
+candidates_tokens = usage_metadata.candidates_token_count
 ```
 
-**No Code Changes Required:** All other configuration (Genesys settings, data actions, MCP tools, session variables) remains identical. The connector automatically handles:
-- Audio format conversion (PCMU ↔ PCM16 with resampling)
-- Function calling format translation
-- Voice mapping
-- Session management
-- VAD event handling
+Detailed breakdown by modality via `response_tokens_details`:
+```python
+for detail in usage_metadata.response_tokens_details:
+    modality = detail.modality  # "TEXT" or "AUDIO"
+    count = detail.token_count
+```
 
-Your Architect flows work with both providers without modification.
+Metrics tracked:
+- **Input**: Estimated from `prompt_token_count` (audio-dominant for voice)
+- **Output**: Broken down by `TEXT` and `AUDIO` modalities from `response_tokens_details`
+
+#### Function Calling (Gemini)
+- Uses Gemini's native function declaration format
+- Tools defined with `name`, `description`, and `parameters` (JSON Schema)
+- Function responses sent via `session.send_client_content()` with `FunctionResponse` objects
+
+#### Model Options
+- `gemini-2.5-flash-native-audio-preview-09-2025` (default, optimized for voice)
+- Supports native audio output with natural speech synthesis
+- Features: Affective dialogue, proactive audio, thinking capabilities
+
+#### Voice Options
+Gemini automatically selects appropriate voices based on language. Available voices include:
+- `Kore` (default), `Puck`, `Charon`, `Aoede`, `Fenrir`, `Orbit`, and many more
+
+See the complete list at: https://ai.google.dev/gemini-api/docs/speech-generation#voices
+
+---
+
+## Choosing Between OpenAI and Gemini
+
+| Feature | OpenAI Realtime API | Gemini Live API |
+|---------|---------------------|-----------------|
+| **Native Audio Processing** | Yes | Yes (with enhanced quality) |
+| **Function Calling** | ✓ | ✓ |
+| **Voice Options** | 8 voices | 6+ voices (language-adaptive) |
+| **Audio Quality** | High | High (24kHz output) |
+| **Latency** | Very Low | Very Low |
+| **Token Tracking** | Detailed breakdown | Detailed breakdown |
+| **Context Window** | Model-dependent | 128k tokens (native audio models) |
+| **Special Features** | - | Affective dialogue, thinking mode |
+| **Pricing** | Per model tier | Based on Google AI pricing |
+
+**When to choose OpenAI:**
+- You need a well-established API with extensive documentation
+- You're already using OpenAI for other services
+- You prefer the specific voice characteristics of OpenAI voices
+
+**When to choose Gemini:**
+- You want Google's latest multimodal AI capabilities
+- You need advanced features like affective dialogue or thinking mode
+- You're building within the Google Cloud ecosystem
+- You want potentially lower costs with newer models
+
+---
