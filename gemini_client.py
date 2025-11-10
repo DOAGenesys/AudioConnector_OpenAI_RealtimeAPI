@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import io
+import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
@@ -33,9 +34,48 @@ from utils import (
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
-Call `end_conversation_successfully` when the caller's request has been resolved. Use the `summary` field to explain what was accomplished.
+Call `end_conversation_successfully` ONLY when BOTH of these conditions are met:
+1. The caller's request has been completely addressed and resolved
+2. The caller has explicitly confirmed they don't need any additional help or have no further questions
+
 Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
-Always invoke the correct call-control tool as soon as the user's intent is clear. After confirming, deliver a short verbal acknowledgment."""
+
+Before invoking any call-control function, you MUST ensure all required output session variables are properly filled with accurate information. After the function is called, deliver the appropriate farewell message as instructed."""
+
+
+def _clean_schema_for_gemini(schema: Any) -> Any:
+    """
+    Recursively remove OpenAI-specific fields from a schema.
+
+    Removes:
+    - strict: OpenAI-specific structured output parameter
+    - additionalProperties: While JSON Schema standard, Gemini doesn't accept it
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a deep copy to avoid modifying the original
+    cleaned = copy.deepcopy(schema)
+
+    # Remove OpenAI-specific fields at this level
+    cleaned.pop("strict", None)
+    cleaned.pop("additionalProperties", None)
+
+    # Recursively clean nested objects
+    if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+        for key, value in cleaned["properties"].items():
+            if isinstance(value, dict):
+                cleaned["properties"][key] = _clean_schema_for_gemini(value)
+
+    if "items" in cleaned and isinstance(cleaned["items"], dict):
+        cleaned["items"] = _clean_schema_for_gemini(cleaned["items"])
+
+    if "definitions" in cleaned and isinstance(cleaned["definitions"], dict):
+        for key, value in cleaned["definitions"].items():
+            if isinstance(value, dict):
+                cleaned["definitions"][key] = _clean_schema_for_gemini(value)
+
+    return cleaned
 
 
 def _default_call_control_tools() -> List[Dict[str, Any]]:
@@ -44,8 +84,10 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
         {
             "name": "end_conversation_successfully",
             "description": (
-                "Gracefully end the phone call when the caller confirms their needs are met. "
-                "Provide a short summary of the completed task in the `summary` field."
+                "Gracefully end the phone call ONLY when the caller has BOTH: (1) had their request completely addressed, "
+                "AND (2) explicitly confirmed they don't need any additional help or have no further questions. "
+                "Provide a short summary of the completed task in the `summary` field. "
+                "Do NOT call this function if the customer has not explicitly confirmed they are done."
             ),
             "parameters": {
                 "type": "object",
@@ -113,6 +155,8 @@ class GeminiRealtimeClient:
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
         self._response_in_progress = False
         self._has_audio_in_buffer = False
+        self.escalation_prompt = None
+        self.success_prompt = None
 
         # Token tracking for Gemini
         self._total_prompt_tokens = 0
@@ -126,9 +170,14 @@ class GeminiRealtimeClient:
             'output_audio_tokens': 0
         }
 
-        # Gemini client
+        # Gemini client and session context
         self.client = None
         self.model = None
+        self._session_context = None
+
+        # Custom farewell prompts
+        self.escalation_prompt = None
+        self.success_prompt = None
 
     async def terminate_session(self, reason="completed", final_message=None):
         """Terminate the Gemini session."""
@@ -239,7 +288,17 @@ class GeminiRealtimeClient:
             self.temperature = DEFAULT_TEMPERATURE
 
         # Use Gemini 2.5 Flash Native Audio model
-        self.model = model if model else "gemini-2.5-flash-native-audio-preview-09-2025"
+        # Validate that the model is a Gemini model, not an OpenAI model
+        default_gemini_model = "gemini-2.5-flash-native-audio-preview-09-2025"
+        if model:
+            # Check if the provided model is an OpenAI model (starts with "gpt-")
+            if model.startswith("gpt-"):
+                self.logger.warning(f"OpenAI model '{model}' specified but using Gemini. Using default Gemini model: {default_gemini_model}")
+                self.model = default_gemini_model
+            else:
+                self.model = model
+        else:
+            self.model = default_gemini_model
 
         try:
             self.logger.info(f"Connecting to Gemini Live API using model: {self.model}...")
@@ -251,24 +310,34 @@ class GeminiRealtimeClient:
                 http_options={'api_version': 'v1alpha'}
             )
 
-            # Build tool declarations for Gemini
-            tools = []
+            # Build function declarations for Gemini
+            function_declarations = []
 
             # Add call control tools
             call_control_tools = _default_call_control_tools()
-            tools.extend(call_control_tools)
+            function_declarations.extend(call_control_tools)
 
             # Add custom tool definitions (Genesys data actions, etc.)
             if self.custom_tool_definitions:
                 # Convert OpenAI tool format to Gemini format
                 for tool in self.custom_tool_definitions:
                     if tool.get("type") == "function":
+                        # Clean parameters to remove OpenAI-specific fields
+                        parameters = tool.get("parameters", {})
+                        cleaned_parameters = _clean_schema_for_gemini(parameters)
+
                         func_def = {
                             "name": tool["name"],
                             "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {})
+                            "parameters": cleaned_parameters
                         }
-                        tools.append(func_def)
+                        function_declarations.append(func_def)
+
+            # Wrap function declarations in tools structure (required by Gemini Live API)
+            # Format: [{"function_declarations": [...]}]
+            tools = None
+            if function_declarations:
+                tools = [{"function_declarations": function_declarations}]
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -303,6 +372,13 @@ class GeminiRealtimeClient:
                 config=config
             )
 
+            # Enter the context manager manually to get the session
+            self.session = await session_cm.__aenter__()
+
+            # Only set _session_context after successful entry
+            # (if __aenter__ fails, we shouldn't call __aexit__)
+            self._session_context = session_cm
+
             connect_time = time.time() - connect_start
             self.logger.info(
                 f"Gemini Live API connection established in {connect_time:.2f}s "
@@ -310,7 +386,7 @@ class GeminiRealtimeClient:
             )
             self.running = True
 
-            tool_names = [t.get("name", "unknown") for t in tools]
+            tool_names = [t.get("name", "unknown") for t in function_declarations]
             self.logger.info(
                 f"[FunctionCall] Configured {len(tools)} Gemini tools: {tool_names}"
             )
@@ -322,6 +398,39 @@ class GeminiRealtimeClient:
             self.logger.error(f"Model: {self.model}, Voice: {self.voice}, Temperature: {self.temperature}")
             await self.close()
             raise RuntimeError(f"Failed to connect to Gemini Live API: {str(e)}")
+
+    async def _safe_send(self, message: str):
+        """
+        Send a message to Gemini. This method exists for compatibility with OpenAI client interface,
+        but most operations use SDK methods like session.send_client_content() instead.
+
+        For Gemini, this handles OpenAI-format messages that need conversion.
+        """
+        async with self._lock:
+            if not self.running or self.session is None:
+                self.logger.warning("Cannot send message: session not running or not connected")
+                return
+
+            try:
+                # Parse the message to check if it's OpenAI format
+                import json
+                msg_dict = json.loads(message)
+                msg_type = msg_dict.get("type", "")
+
+                if DEBUG == 'true':
+                    self.logger.debug(f"_safe_send called with type={msg_type}")
+
+                # For OpenAI "response.create" messages (used in summary generation),
+                # we don't need to do anything as Gemini's await_summary() handles it differently
+                if msg_type == "response.create":
+                    self.logger.debug("Ignoring OpenAI response.create message - Gemini uses SDK methods")
+                    return
+
+                # For other message types, log a warning
+                self.logger.warning(f"_safe_send called with unhandled message type: {msg_type}")
+
+            except Exception as e:
+                self.logger.error(f"Error in _safe_send: {e}")
 
     async def send_audio(self, pcmu_8k: bytes):
         """Send audio to Gemini (convert PCMU 8kHz to PCM16 16kHz)."""
@@ -369,13 +478,14 @@ class GeminiRealtimeClient:
                             # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz (Genesys)
                             try:
                                 pcm16_24k = message.data
+                                self.logger.debug(f"Received audio from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
 
                                 # Convert PCM16 24kHz to PCMU 8kHz using efficient audioop
                                 pcmu_8k = pcm16_24k_to_pcmu_8k(pcm16_24k)
                                 on_audio_callback(pcmu_8k)
 
                             except Exception as audio_err:
-                                self.logger.error(f"Error processing audio from Gemini: {audio_err}")
+                                self.logger.error(f"Error processing audio from Gemini: {audio_err}", exc_info=True)
 
                         # Handle server content (turn completion, tool calls, etc.)
                         if message.server_content:
@@ -437,15 +547,31 @@ class GeminiRealtimeClient:
         self.read_task = asyncio.create_task(_read_loop())
 
     async def _update_token_metrics(self, usage_metadata):
-        """Update token tracking from Gemini usage metadata."""
+        """
+        Update token tracking from Gemini usage metadata.
+
+        For Gemini Live API:
+        - usage_metadata.prompt_token_count = total input tokens for this turn
+        - usage_metadata.candidates_token_count = total output tokens for this turn
+        - Gemini Live API doesn't break down by modality, but for audio conversations,
+          most tokens are audio tokens (input: 1 token/100ms, output: 1 token/50ms)
+        """
         try:
             # Update totals (these are cumulative from Gemini)
             if hasattr(usage_metadata, 'total_token_count'):
                 total = usage_metadata.total_token_count
             if hasattr(usage_metadata, 'prompt_token_count'):
-                self._total_prompt_tokens = usage_metadata.prompt_token_count
+                prompt_tokens_this_turn = usage_metadata.prompt_token_count
+                self._total_prompt_tokens = prompt_tokens_this_turn
+
             if hasattr(usage_metadata, 'candidates_token_count'):
-                self._total_candidates_tokens = usage_metadata.candidates_token_count
+                candidates_tokens_this_turn = usage_metadata.candidates_token_count
+                self._total_candidates_tokens = candidates_tokens_this_turn
+
+            # For Live API audio conversations, tokens are primarily audio
+            # Accumulate input audio tokens from this turn
+            if prompt_tokens_this_turn > 0:
+                self._token_details['input_audio_tokens'] += prompt_tokens_this_turn
 
             # Update detailed breakdown by modality (cumulative values from Gemini)
             if hasattr(usage_metadata, 'prompt_token_count_details'):
@@ -510,7 +636,12 @@ class GeminiRealtimeClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                # Use custom SUCCESS_PROMPT if provided, otherwise use default
+                if self.success_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
+                else:
+                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
                 reason = (args or {}).get("reason") or "Caller requested escalation"
@@ -518,30 +649,40 @@ class GeminiRealtimeClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Use custom ESCALATION_PROMPT if provided, otherwise use default
+                if self.escalation_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
+                else:
+                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}")
                 output_payload = {"result": "error", "error": f"Unknown function: {name}"}
 
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=True
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
-            self.logger.info(f"[FunctionCall] Sent function response for {name}")
+            self.logger.info(f"[FunctionCall] Sent function response for {name} (call_id={call_id})")
 
             if closing_instruction and self._disconnect_context:
+                # Send the closing instruction to make Gemini say the farewell
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=closing_instruction)]
+                    ),
+                    turn_complete=True
+                )
                 self.logger.info(
-                    f"[FunctionCall] Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
+                    f"[FunctionCall] Sent closing instruction to Gemini. Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
                 )
 
         except Exception as e:
@@ -588,19 +729,16 @@ class GeminiRealtimeClient:
         try:
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
+                id=call_id,
                 name=name,
                 response=output_payload
             )
 
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)]
-                ),
-                turn_complete=True
+            await self.session.send_tool_response(
+                function_responses=[function_response]
             )
 
-            self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name}")
+            self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})")
         except Exception as send_exc:
             self.logger.error(f"[FunctionCall] CRITICAL ERROR: Failed to send tool result: {send_exc}", exc_info=True)
 
@@ -610,12 +748,16 @@ class GeminiRealtimeClient:
         self.logger.info(f"Closing Gemini connection after {duration:.2f}s")
         self.running = False
 
-        if self.session:
+        # Exit the async context manager if it exists
+        if self._session_context:
             try:
-                # Gemini session cleanup happens automatically
-                pass
+                await self._session_context.__aexit__(None, None, None)
+                self.logger.debug("Successfully exited Gemini session context")
             except Exception as e:
-                self.logger.error(f"Error closing Gemini session: {e}")
+                self.logger.error(f"Error exiting Gemini session context: {e}")
+            self._session_context = None
+
+        if self.session:
             self.session = None
 
         if self.read_task:
