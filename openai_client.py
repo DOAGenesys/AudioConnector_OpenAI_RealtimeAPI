@@ -98,6 +98,16 @@ class OpenAIRealtimeClient:
         self.tool_instruction_text: Optional[str] = None
         self.custom_tool_choice: Optional[Any] = None
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
+
+        # Cumulative token tracking across all responses in the session
+        self.cumulative_tokens = {
+            "input_text_tokens": 0,
+            "input_cached_text_tokens": 0,
+            "input_audio_tokens": 0,
+            "input_cached_audio_tokens": 0,
+            "output_text_tokens": 0,
+            "output_audio_tokens": 0
+        }
         self._response_in_progress = False
         self._has_audio_in_buffer = False
 
@@ -513,7 +523,26 @@ class OpenAIRealtimeClient:
                                 
                                 summary_str = ", ".join(output_summary) if output_summary else "no output"
                                 self.logger.info(f"[FunctionCall] response.done id={response_id}, status={response_status}, output=[{summary_str}]")
-                                
+
+                                # Accumulate token usage from this response
+                                try:
+                                    usage = response_obj.get("usage", {})
+                                    if usage:
+                                        input_details = usage.get("input_token_details", {})
+                                        cached_details = input_details.get("cached_tokens_details", {})
+                                        output_details = usage.get("output_token_details", {})
+
+                                        self.cumulative_tokens["input_text_tokens"] += input_details.get("text_tokens", 0)
+                                        self.cumulative_tokens["input_cached_text_tokens"] += cached_details.get("text_tokens", 0)
+                                        self.cumulative_tokens["input_audio_tokens"] += input_details.get("audio_tokens", 0)
+                                        self.cumulative_tokens["input_cached_audio_tokens"] += cached_details.get("audio_tokens", 0)
+                                        self.cumulative_tokens["output_text_tokens"] += output_details.get("text_tokens", 0)
+                                        self.cumulative_tokens["output_audio_tokens"] += output_details.get("audio_tokens", 0)
+
+                                        self.logger.debug(f"[TokenTracking] Accumulated tokens - Input: text={self.cumulative_tokens['input_text_tokens']}, cached_text={self.cumulative_tokens['input_cached_text_tokens']}, audio={self.cumulative_tokens['input_audio_tokens']}, cached_audio={self.cumulative_tokens['input_cached_audio_tokens']} | Output: text={self.cumulative_tokens['output_text_tokens']}, audio={self.cumulative_tokens['output_audio_tokens']}")
+                                except Exception as token_err:
+                                    self.logger.warning(f"[TokenTracking] Failed to accumulate token usage: {token_err}")
+
                                 meta = response_obj.get("metadata") or {}
                                 if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
                                     self._summary_future.set_result(msg_dict)
