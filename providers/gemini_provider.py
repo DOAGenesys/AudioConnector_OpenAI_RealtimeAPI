@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 import base64
+import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import websockets
@@ -86,6 +87,41 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _clean_schema_for_gemini(schema: Any) -> Any:
+    """
+    Recursively remove OpenAI-specific fields from a schema.
+
+    Removes:
+    - strict: OpenAI-specific structured output parameter
+    - additionalProperties: While JSON Schema standard, Gemini doesn't accept it
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a deep copy to avoid modifying the original
+    cleaned = copy.deepcopy(schema)
+
+    # Remove OpenAI-specific fields at this level
+    cleaned.pop("strict", None)
+    cleaned.pop("additionalProperties", None)
+
+    # Recursively clean nested objects
+    if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+        for key, value in cleaned["properties"].items():
+            if isinstance(value, dict):
+                cleaned["properties"][key] = _clean_schema_for_gemini(value)
+
+    if "items" in cleaned and isinstance(cleaned["items"], dict):
+        cleaned["items"] = _clean_schema_for_gemini(cleaned["items"])
+
+    if "definitions" in cleaned and isinstance(cleaned["definitions"], dict):
+        for key, value in cleaned["definitions"].items():
+            if isinstance(value, dict):
+                cleaned["definitions"][key] = _clean_schema_for_gemini(value)
+
+    return cleaned
+
+
 def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convert OpenAI function definition format to Gemini function declaration format.
@@ -95,7 +131,7 @@ def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any
         "type": "function",
         "name": "...",
         "description": "...",
-        "parameters": {"type": "object", "properties": {...}, "required": [...]}
+        "parameters": {"type": "object", "properties": {...}, "required": [...], "strict": True}
     }
 
     Gemini format:
@@ -104,18 +140,18 @@ def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any
         "description": "...",
         "parameters": {"type": "object", "properties": {...}, "required": [...]}
     }
+
+    Note: Removes OpenAI-specific fields like 'strict' and 'additionalProperties' that Gemini rejects.
     """
+    # Get the parameters and clean them recursively
+    parameters = openai_tool.get("parameters", {})
+    cleaned_parameters = _clean_schema_for_gemini(parameters)
+
     gemini_tool = {
         "name": openai_tool.get("name"),
         "description": openai_tool.get("description", ""),
-        "parameters": openai_tool.get("parameters", {})
+        "parameters": cleaned_parameters
     }
-
-    # Remove OpenAI-specific fields that Gemini doesn't support
-    if "strict" in gemini_tool.get("parameters", {}):
-        del gemini_tool["parameters"]["strict"]
-    if "additionalProperties" in gemini_tool.get("parameters", {}):
-        del gemini_tool["parameters"]["additionalProperties"]
 
     return gemini_tool
 
