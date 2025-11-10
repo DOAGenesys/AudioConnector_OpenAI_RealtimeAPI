@@ -32,6 +32,7 @@ from gemini_client import GeminiRealtimeClient
 from utils import format_json, parse_iso8601_duration
 from genesys_actions import build_genesys_tool_context
 from mcp_tools import load_mcp_tool_context
+from config import AI_PROVIDER
 
 from collections import deque
 
@@ -388,6 +389,8 @@ class AudioHookServer:
         agent_name = input_vars.get("AGENT_NAME", DEFAULT_AGENT_NAME)
         company_name = next((value for key, value in input_vars.items()
                             if key.strip() == "COMPANY_NAME"), DEFAULT_COMPANY_NAME)
+        escalation_prompt = input_vars.get("ESCALATION_PROMPT")
+        success_prompt = input_vars.get("SUCCESS_PROMPT")
 
         try:
             self.genesys_tool_context = await build_genesys_tool_context(self.logger, input_vars)
@@ -439,6 +442,10 @@ class AudioHookServer:
             self.logger.info(f"Enforcing language: {language}")
         if customer_data:
             self.logger.debug("Customer data provided for personalization")
+        if escalation_prompt:
+            self.logger.info(f"Using custom ESCALATION_PROMPT: {escalation_prompt}")
+        if success_prompt:
+            self.logger.info(f"Using custom SUCCESS_PROMPT: {success_prompt}")
 
         try:
             # Create the appropriate AI client based on vendor selection

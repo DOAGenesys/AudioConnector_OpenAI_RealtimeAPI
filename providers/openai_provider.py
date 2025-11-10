@@ -15,7 +15,7 @@ from config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEBUG,
-    AI_MODEL,
+    OPENAI_MODEL,
     GENESYS_RATE_WINDOW
 )
 from utils import format_json, create_final_system_prompt, is_websocket_open, get_websocket_connect_kwargs
@@ -98,20 +98,8 @@ class OpenAIRealtimeClient:
         self.tool_instruction_text: Optional[str] = None
         self.custom_tool_choice: Optional[Any] = None
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
-
-        # Cumulative token tracking across all responses in the session
-        self.cumulative_tokens = {
-            "input_text_tokens": 0,
-            "input_cached_text_tokens": 0,
-            "input_audio_tokens": 0,
-            "input_cached_audio_tokens": 0,
-            "output_text_tokens": 0,
-            "output_audio_tokens": 0
-        }
         self._response_in_progress = False
         self._has_audio_in_buffer = False
-        self.escalation_prompt = None
-        self.success_prompt = None
 
     async def terminate_session(self, reason="completed", final_message=None):
         try:
@@ -233,7 +221,7 @@ class OpenAIRealtimeClient:
             logger.warning(f"Invalid temperature value: {temperature}. Using default: {DEFAULT_TEMPERATURE}")
             self.temperature = DEFAULT_TEMPERATURE
 
-        self.model = model if model else AI_MODEL
+        self.model = model if model else OPENAI_MODEL
         global OPENAI_REALTIME_URL
         OPENAI_REALTIME_URL = f"wss://api.openai.com/v1/realtime?model={self.model}"
 
@@ -525,26 +513,7 @@ class OpenAIRealtimeClient:
                                 
                                 summary_str = ", ".join(output_summary) if output_summary else "no output"
                                 self.logger.info(f"[FunctionCall] response.done id={response_id}, status={response_status}, output=[{summary_str}]")
-
-                                # Accumulate token usage from this response
-                                try:
-                                    usage = response_obj.get("usage", {})
-                                    if usage:
-                                        input_details = usage.get("input_token_details", {})
-                                        cached_details = input_details.get("cached_tokens_details", {})
-                                        output_details = usage.get("output_token_details", {})
-
-                                        self.cumulative_tokens["input_text_tokens"] += input_details.get("text_tokens", 0)
-                                        self.cumulative_tokens["input_cached_text_tokens"] += cached_details.get("text_tokens", 0)
-                                        self.cumulative_tokens["input_audio_tokens"] += input_details.get("audio_tokens", 0)
-                                        self.cumulative_tokens["input_cached_audio_tokens"] += cached_details.get("audio_tokens", 0)
-                                        self.cumulative_tokens["output_text_tokens"] += output_details.get("text_tokens", 0)
-                                        self.cumulative_tokens["output_audio_tokens"] += output_details.get("audio_tokens", 0)
-
-                                        self.logger.debug(f"[TokenTracking] Accumulated tokens - Input: text={self.cumulative_tokens['input_text_tokens']}, cached_text={self.cumulative_tokens['input_cached_text_tokens']}, audio={self.cumulative_tokens['input_audio_tokens']}, cached_audio={self.cumulative_tokens['input_cached_audio_tokens']} | Output: text={self.cumulative_tokens['output_text_tokens']}, audio={self.cumulative_tokens['output_audio_tokens']}")
-                                except Exception as token_err:
-                                    self.logger.warning(f"[TokenTracking] Failed to accumulate token usage: {token_err}")
-
+                                
                                 meta = response_obj.get("metadata") or {}
                                 if meta.get("type") == "ending_analysis" and self._summary_future and not self._summary_future.done():
                                     self._summary_future.set_result(msg_dict)
@@ -700,12 +669,7 @@ class OpenAIRealtimeClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                # Use custom SUCCESS_PROMPT if provided, otherwise use default
-                if self.success_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
-                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
-                else:
-                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
                 reason = (args or {}).get("reason") or "Caller requested escalation"
@@ -713,12 +677,7 @@ class OpenAIRealtimeClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                # Use custom ESCALATION_PROMPT if provided, otherwise use default
-                if self.escalation_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
-                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
-                else:
-                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}. Sending error response.")
                 output_payload = {"result": "error", "error": f"Unknown function: {name}"}

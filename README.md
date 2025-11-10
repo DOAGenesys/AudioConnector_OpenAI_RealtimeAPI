@@ -29,6 +29,13 @@ This application serves as a WebSocket middleware that captures audio from Genes
 7. **Graceful Disconnect**: After farewell audio completes and buffer drains, connector sends disconnect message to Genesys with session outcome data (escalation status, completion summary, token metrics)
 8. **Architect Flow Routing**: Architect uses output variables (`ESCALATION_REQUIRED`, `ESCALATION_REASON`, `COMPLETION_SUMMARY`) to route the call appropriately (queue transfer, wrap-up, etc.)
 
+### Audio Format Handling
+
+The connector automatically handles audio format conversion for both providers:
+- **Genesys**: PCMU (μ-law) @ 8kHz
+- **OpenAI**: PCMU @ 8kHz (native support, no conversion needed)
+- **Gemini**: PCM16 @ 16kHz input, PCM16 @ 24kHz output (automatic conversion)
+
 ## Prerequisites
 
 - Python 3.9 or higher
@@ -156,9 +163,11 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 #### Step 3: Configure Environment Variables
 
-**Minimum Mandatory Environment Variables:**
+**Provider Selection (Required):**
 
-These are the **required** environment variables you must set for the integration to work:
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `AI_PROVIDER` | AI provider to use | `openai` | `openai` or `gemini` |
 
 | Variable | Description | Example Value |
 |----------|-------------|---------------|
