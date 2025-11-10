@@ -39,9 +39,20 @@ AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 GENESYS_PATH = "/audiohook"
 
 # AI Vendor selection (openai or gemini)
-AI_VENDOR = os.getenv('AI_VENDOR', 'openai').lower()
+_ai_vendor = os.getenv('AI_VENDOR')
+_ai_provider = os.getenv('AI_PROVIDER')  # legacy name used by earlier modules
+
+if _ai_provider and not _ai_vendor:
+    # allow older deployments that still set AI_PROVIDER
+    _ai_vendor = _ai_provider
+
+AI_VENDOR = (_ai_vendor or 'openai').lower()
+
 if AI_VENDOR not in ('openai', 'gemini'):
     raise ValueError(f"AI_VENDOR must be 'openai' or 'gemini', got '{AI_VENDOR}'")
+
+# maintain backward compatibility with modules importing AI_PROVIDER directly
+AI_PROVIDER = AI_VENDOR
 
 # Vendor-specific API keys
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')

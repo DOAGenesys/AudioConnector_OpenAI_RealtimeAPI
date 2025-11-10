@@ -33,9 +33,13 @@ from utils import format_json, create_final_system_prompt, is_websocket_open, pc
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
-Call `end_conversation_successfully` when the caller's request has been resolved. Use the `summary` field to explain what was accomplished.
+Call `end_conversation_successfully` ONLY when BOTH of these conditions are met:
+1. The caller's request has been completely addressed and resolved
+2. The caller has explicitly confirmed they don't need any additional help or have no further questions
+
 Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
-Always invoke the correct call-control tool as soon as the user's intent is clear. After confirming, deliver a short verbal acknowledgment."""
+
+Before invoking any call-control function, you MUST ensure all required output session variables are properly filled with accurate information. After the function is called, deliver the appropriate farewell message as instructed."""
 
 
 def _default_call_control_tools() -> List[Dict[str, Any]]:
@@ -47,8 +51,10 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
         {
             "name": "end_conversation_successfully",
             "description": (
-                "Gracefully end the phone call when the caller confirms their needs are met. "
-                "Provide a short summary of the completed task in the `summary` field."
+                "Gracefully end the phone call ONLY when the caller has BOTH: (1) had their request completely addressed, "
+                "AND (2) explicitly confirmed they don't need any additional help or have no further questions. "
+                "Provide a short summary of the completed task in the `summary` field. "
+                "Do NOT call this function if the customer has not explicitly confirmed they are done."
             ),
             "parameters": {
                 "type": "object",
