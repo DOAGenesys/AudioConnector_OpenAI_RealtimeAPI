@@ -226,11 +226,11 @@ class GeminiRealtimeClient:
             )
 
             # Build tool declarations for Gemini
-            tools = []
+            function_declarations = []
 
             # Add call control tools
             call_control_tools = _default_call_control_tools()
-            tools.extend(call_control_tools)
+            function_declarations.extend(call_control_tools)
 
             # Add custom tool definitions (Genesys data actions, etc.)
             if self.custom_tool_definitions:
@@ -242,7 +242,7 @@ class GeminiRealtimeClient:
                             "description": tool.get("description", ""),
                             "parameters": tool.get("parameters", {})
                         }
-                        tools.append(func_def)
+                        function_declarations.append(func_def)
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -250,6 +250,11 @@ class GeminiRealtimeClient:
             if self.tool_instruction_text:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
+
+            # Wrap function declarations in Tool format for SDK
+            tools = None
+            if function_declarations:
+                tools = [types.Tool(function_declarations=function_declarations)]
 
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
@@ -261,7 +266,7 @@ class GeminiRealtimeClient:
                         )
                     )
                 ),
-                tools=tools if tools else None,
+                tools=tools,
             )
 
             # Connect to Live API
@@ -274,7 +279,7 @@ class GeminiRealtimeClient:
             self.logger.info(f"Gemini Live API connection established in {connect_time:.2f}s")
             self.running = True
 
-            tool_names = [t.get("name", "unknown") for t in tools]
+            tool_names = [t.get("name", "unknown") for t in function_declarations]
             self.logger.info(
                 f"[FunctionCall] Configured Gemini tools: {tool_names}; voice={self.voice}"
             )
@@ -285,6 +290,39 @@ class GeminiRealtimeClient:
             self.logger.error(f"Error establishing Gemini connection: {e}")
             await self.close()
             raise RuntimeError(f"Failed to connect to Gemini: {str(e)}")
+
+    async def _safe_send(self, message: str):
+        """
+        Send a message to Gemini. This method exists for compatibility with OpenAI client interface,
+        but most operations use SDK methods like session.send_client_content() instead.
+
+        For Gemini, this handles OpenAI-format messages that need conversion.
+        """
+        async with self._lock:
+            if not self.running or self.session is None:
+                self.logger.warning("Cannot send message: session not running or not connected")
+                return
+
+            try:
+                # Parse the message to check if it's OpenAI format
+                import json
+                msg_dict = json.loads(message)
+                msg_type = msg_dict.get("type", "")
+
+                if DEBUG == 'true':
+                    self.logger.debug(f"_safe_send called with type={msg_type}")
+
+                # For OpenAI "response.create" messages (used in summary generation),
+                # we don't need to do anything as Gemini's await_summary() handles it differently
+                if msg_type == "response.create":
+                    self.logger.debug("Ignoring OpenAI response.create message - Gemini uses SDK methods")
+                    return
+
+                # For other message types, log a warning
+                self.logger.warning(f"_safe_send called with unhandled message type: {msg_type}")
+
+            except Exception as e:
+                self.logger.error(f"Error in _safe_send: {e}")
 
     async def send_audio(self, pcmu_8k: bytes):
         """Send audio to Gemini (convert PCMU to PCM16 16kHz)."""
