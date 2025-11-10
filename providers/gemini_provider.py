@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 import base64
+import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import websockets
@@ -33,9 +34,13 @@ from utils import format_json, create_final_system_prompt, is_websocket_open, pc
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
-Call `end_conversation_successfully` when the caller's request has been resolved. Use the `summary` field to explain what was accomplished.
+Call `end_conversation_successfully` ONLY when BOTH of these conditions are met:
+1. The caller's request has been completely addressed and resolved
+2. The caller has explicitly confirmed they don't need any additional help or have no further questions
+
 Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
-Always invoke the correct call-control tool as soon as the user's intent is clear. After confirming, deliver a short verbal acknowledgment."""
+
+Before invoking any call-control function, you MUST ensure all required output session variables are properly filled with accurate information. After the function is called, deliver the appropriate farewell message as instructed."""
 
 
 def _default_call_control_tools() -> List[Dict[str, Any]]:
@@ -47,8 +52,10 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
         {
             "name": "end_conversation_successfully",
             "description": (
-                "Gracefully end the phone call when the caller confirms their needs are met. "
-                "Provide a short summary of the completed task in the `summary` field."
+                "Gracefully end the phone call ONLY when the caller has BOTH: (1) had their request completely addressed, "
+                "AND (2) explicitly confirmed they don't need any additional help or have no further questions. "
+                "Provide a short summary of the completed task in the `summary` field. "
+                "Do NOT call this function if the customer has not explicitly confirmed they are done."
             ),
             "parameters": {
                 "type": "object",
@@ -80,6 +87,41 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _clean_schema_for_gemini(schema: Any) -> Any:
+    """
+    Recursively remove OpenAI-specific fields from a schema.
+
+    Removes:
+    - strict: OpenAI-specific structured output parameter
+    - additionalProperties: While JSON Schema standard, Gemini doesn't accept it
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a deep copy to avoid modifying the original
+    cleaned = copy.deepcopy(schema)
+
+    # Remove OpenAI-specific fields at this level
+    cleaned.pop("strict", None)
+    cleaned.pop("additionalProperties", None)
+
+    # Recursively clean nested objects
+    if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+        for key, value in cleaned["properties"].items():
+            if isinstance(value, dict):
+                cleaned["properties"][key] = _clean_schema_for_gemini(value)
+
+    if "items" in cleaned and isinstance(cleaned["items"], dict):
+        cleaned["items"] = _clean_schema_for_gemini(cleaned["items"])
+
+    if "definitions" in cleaned and isinstance(cleaned["definitions"], dict):
+        for key, value in cleaned["definitions"].items():
+            if isinstance(value, dict):
+                cleaned["definitions"][key] = _clean_schema_for_gemini(value)
+
+    return cleaned
+
+
 def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convert OpenAI function definition format to Gemini function declaration format.
@@ -89,7 +131,7 @@ def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any
         "type": "function",
         "name": "...",
         "description": "...",
-        "parameters": {"type": "object", "properties": {...}, "required": [...]}
+        "parameters": {"type": "object", "properties": {...}, "required": [...], "strict": True}
     }
 
     Gemini format:
@@ -98,18 +140,18 @@ def _convert_openai_tool_to_gemini(openai_tool: Dict[str, Any]) -> Dict[str, Any
         "description": "...",
         "parameters": {"type": "object", "properties": {...}, "required": [...]}
     }
+
+    Note: Removes OpenAI-specific fields like 'strict' and 'additionalProperties' that Gemini rejects.
     """
+    # Get the parameters and clean them recursively
+    parameters = openai_tool.get("parameters", {})
+    cleaned_parameters = _clean_schema_for_gemini(parameters)
+
     gemini_tool = {
         "name": openai_tool.get("name"),
         "description": openai_tool.get("description", ""),
-        "parameters": openai_tool.get("parameters", {})
+        "parameters": cleaned_parameters
     }
-
-    # Remove OpenAI-specific fields that Gemini doesn't support
-    if "strict" in gemini_tool.get("parameters", {}):
-        del gemini_tool["parameters"]["strict"]
-    if "additionalProperties" in gemini_tool.get("parameters", {}):
-        del gemini_tool["parameters"]["additionalProperties"]
 
     return gemini_tool
 
@@ -148,6 +190,8 @@ class GeminiLiveClient:
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
         self._response_in_progress = False
         self._has_audio_in_buffer = False
+        self.escalation_prompt = None
+        self.success_prompt = None
 
         # Gemini-specific state
         self._pending_function_calls: Dict[str, Dict[str, Any]] = {}
@@ -613,7 +657,12 @@ class GeminiLiveClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                # Use custom SUCCESS_PROMPT if provided, otherwise use default
+                if self.success_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
+                else:
+                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
 
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
@@ -622,7 +671,12 @@ class GeminiLiveClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Use custom ESCALATION_PROMPT if provided, otherwise use default
+                if self.escalation_prompt:
+                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
+                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
+                else:
+                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
 
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}. Sending error response.")

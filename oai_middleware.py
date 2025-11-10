@@ -6,6 +6,13 @@ import websockets
 import http
 import os
 
+try:
+    from websockets.asyncio.server import ServerConnection as _ServerConnection
+    from websockets.http11 import Request as _WsRequest
+except Exception:
+    _ServerConnection = None
+    _WsRequest = None
+
 from config import (
     GENESYS_PATH,
     logger,
@@ -18,9 +25,34 @@ from audio_hook_server import AudioHookServer
 from utils import format_json
 from datetime import datetime
 
-async def validate_request(path, request_headers):
+async def validate_request(path_or_connection, headers_or_request):
     logger.info(f"\n{'='*50}\n[HTTP] Incoming request validation")
-    logger.info(f"[HTTP] Request path: {path}")
+    connection = None
+    request = None
+
+    if _ServerConnection and isinstance(path_or_connection, _ServerConnection):
+        connection = path_or_connection
+
+    if _WsRequest and isinstance(headers_or_request, _WsRequest):
+        request = headers_or_request
+    elif connection and _WsRequest and isinstance(getattr(connection, "request", None), _WsRequest):
+        request = connection.request
+
+    if request:
+        path_value = request.path
+        header_source = request.headers
+    else:
+        path_value = path_or_connection
+        header_source = headers_or_request
+
+    if isinstance(path_value, str):
+        request_path = path_value
+    else:
+        request_path = getattr(path_value, "path", None)
+        if request_path is None:
+            request_path = str(path_value)
+
+    logger.info(f"[HTTP] Request path: {request_path}")
     logger.info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
 
     def build_header_map(source):
@@ -39,8 +71,17 @@ async def validate_request(path, request_headers):
                 pairs = []
         return {str(k).lower(): str(v) for k, v in pairs}
 
-    header_keys = build_header_map(request_headers)
-    logger.info(f"[HTTP] Remote address: {header_keys.get('host', 'unknown')}")
+    header_keys = build_header_map(header_source or {})
+
+    remote_address = None
+    if connection is not None:
+        remote_address = getattr(connection, "remote_address", None)
+    if remote_address and isinstance(remote_address, (tuple, list)) and len(remote_address) >= 2:
+        remote_repr = f"{remote_address[0]}:{remote_address[1]}"
+    else:
+        remote_repr = header_keys.get('host', 'unknown')
+
+    logger.info(f"[HTTP] Remote address: {remote_repr}")
 
     logger.info("[HTTP] Full headers received:")
     for name, value in header_keys.items():
@@ -50,19 +91,24 @@ async def validate_request(path, request_headers):
             logger.info(f"[HTTP]   {name}: {value}")
 
     upgrade_header = header_keys.get('upgrade', '').lower()
-    
-    if path == '/' or path == '':
+
+    def _build_response(status: http.HTTPStatus, text: str):
+        if connection and hasattr(connection, "respond"):
+            return connection.respond(status, text)
+        return status, [], text.encode()
+
+    if request_path == '/' or request_path == '':
         if upgrade_header != 'websocket':
             logger.info("[HTTP] Health check request detected at root path, returning 200 OK")
-            return http.HTTPStatus.OK, [], b'OK\n'
+            return _build_response(http.HTTPStatus.OK, 'OK\n')
 
-    if not path.startswith(GENESYS_PATH):
+    if not request_path.startswith(GENESYS_PATH):
         logger.error("[HTTP] Path mismatch:")
         logger.error(f"[HTTP]   Expected path to start with: {GENESYS_PATH}")
-        logger.error(f"[HTTP]   Received path: {path}")
-        return http.HTTPStatus.NOT_FOUND, [], b'Invalid path\n'
+        logger.error(f"[HTTP]   Received path: {request_path}")
+        return _build_response(http.HTTPStatus.NOT_FOUND, 'Invalid path\n')
     
-    logger.info(f"[HTTP] Path validation passed: {path} matches {GENESYS_PATH}")
+    logger.info(f"[HTTP] Path validation passed: {request_path} matches {GENESYS_PATH}")
 
     # --- Start of Security Update ---
     # Check for the presence and value of the x-api-key
@@ -70,11 +116,11 @@ async def validate_request(path, request_headers):
 
     if not incoming_api_key:
         logger.error("[HTTP] Connection rejected - Missing 'x-api-key' header.")
-        return http.HTTPStatus.UNAUTHORIZED, [], b"Missing 'x-api-key' header\n"
+        return _build_response(http.HTTPStatus.UNAUTHORIZED, "Missing 'x-api-key' header\n")
 
     if incoming_api_key != GENESYS_API_KEY:
         logger.error("[HTTP] Connection rejected - Invalid API Key.")
-        return http.HTTPStatus.UNAUTHORIZED, [], b"Invalid API Key\n"
+        return _build_response(http.HTTPStatus.UNAUTHORIZED, "Invalid API Key\n")
 
     logger.info("[HTTP] API Key validation successful.")
     # --- End of Security Update ---
@@ -101,26 +147,26 @@ async def validate_request(path, request_headers):
         error_msg = f"Missing required headers (excluding x-api-key): {', '.join(missing_headers)}"
         logger.error(f"[HTTP] Connection rejected - {error_msg}")
         logger.error("[HTTP] Found headers: " + ", ".join(found_headers))
-        return http.HTTPStatus.BAD_REQUEST, [], error_msg.encode()
+        return _build_response(http.HTTPStatus.BAD_REQUEST, error_msg)
 
     upgrade_header = header_keys.get('upgrade', '').lower()
     logger.info(f"[HTTP] Checking upgrade header: {upgrade_header}")
     if upgrade_header != 'websocket':
         error_msg = f"Invalid upgrade header: {upgrade_header}"
         logger.error(f"[HTTP] {error_msg}")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket upgrade required\n'
+        return _build_response(http.HTTPStatus.BAD_REQUEST, 'WebSocket upgrade required\n')
 
     ws_version = header_keys.get('sec-websocket-version', '')
     logger.info(f"[HTTP] Checking WebSocket version: {ws_version}")
     if ws_version != '13':
         error_msg = f"Invalid WebSocket version: {ws_version}"
         logger.error(f"[HTTP] {error_msg}")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket version 13 required\n'
+        return _build_response(http.HTTPStatus.BAD_REQUEST, 'WebSocket version 13 required\n')
 
     ws_key = header_keys.get('sec-websocket-key')
     if not ws_key:
         logger.error("[HTTP] Missing WebSocket key")
-        return http.HTTPStatus.BAD_REQUEST, [], b'WebSocket key required\n'
+        return _build_response(http.HTTPStatus.BAD_REQUEST, 'WebSocket key required\n')
     logger.info("[HTTP] Found valid WebSocket key")
 
     ws_protocol = header_keys.get('sec-websocket-protocol', '')
