@@ -226,7 +226,8 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 
 Create an inbound call flow with the Call Audio Connector action referencing your integration. Example:
 
-<img width="447" height="870" alt="image" src="https://github.com/user-attachments/assets/c32f9173-2459-4b3d-8851-a78dfadf30a0" />
+<img width="504" height="769" alt="image" src="https://github.com/user-attachments/assets/ce5efcf3-a031-41d9-9281-bcfb0e3e83f5" />
+
 
 You can import the inbound call flow in this repo (DO - Audio Connector - OAI_v16-0.i3InboundFlow) and use it as a starting point. You will still have to configure all the session variables in the "Call Audio Connector" action, including these two fundamental session variables: DATA_ACTION_IDS and DATA_ACTION_DESCRIPTIONS (see `Session Variables` and `Genesys Data Action Tools` sections below), which will determine agentic tool usage. Also, modify the instruction and guardrail prompts (which are concatenated to form the final system prompt that is sent to OpenAI) according to your use cases.
 
