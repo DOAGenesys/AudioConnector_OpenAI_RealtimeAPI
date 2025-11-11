@@ -35,6 +35,11 @@ MAX_AUDIO_BUFFER_SIZE = 1200
 AUDIO_BUFFER_WARNING_THRESHOLD_HIGH = 0.90
 AUDIO_BUFFER_WARNING_THRESHOLD_MEDIUM = 0.75
 
+# Genesys AudioHook always exchanges PCMU 8kHz frames that are 1600 bytes long.
+# Keeping this in config ensures every vendor client targets the same framing.
+GENESYS_PCMU_FRAME_SIZE = 1600
+GENESYS_PCMU_SILENCE_BYTE = 0xFF
+
 # Server settings
 GENESYS_PATH = "/audiohook"
 
