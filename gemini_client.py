@@ -22,7 +22,9 @@ from config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEBUG,
-    GENESYS_RATE_WINDOW
+    GENESYS_RATE_WINDOW,
+    GENESYS_PCMU_FRAME_SIZE,
+    GENESYS_PCMU_SILENCE_BYTE
 )
 from utils import (
     format_json,
@@ -158,6 +160,7 @@ class GeminiRealtimeClient:
         self._has_audio_in_buffer = False
         self.escalation_prompt = None
         self.success_prompt = None
+        self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
         # Token tracking for Gemini
         self._total_prompt_tokens = 0
@@ -176,9 +179,10 @@ class GeminiRealtimeClient:
         self.model = None
         self._session_context = None
 
-        # Custom farewell prompts
-        self.escalation_prompt = None
-        self.success_prompt = None
+        # Downlink audio buffering (Gemini PCM16 -> Genesys PCMU)
+        self._on_audio_callback = None
+        self._pending_pcmu_bytes = bytearray()
+        self._pcmu_frame_size = GENESYS_PCMU_FRAME_SIZE
 
     async def terminate_session(self, reason="completed", final_message=None):
         """Terminate the Gemini session."""
@@ -244,6 +248,24 @@ class GeminiRealtimeClient:
         self.custom_tool_definitions = tool_definitions or []
         self.tool_instruction_text = tool_instructions
         self.custom_tool_choice = tool_choice
+        if max_output_tokens is None:
+            self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+        else:
+            max_tokens_value = str(max_output_tokens).strip().lower()
+            if max_tokens_value == "inf":
+                self.max_output_tokens = None
+            else:
+                try:
+                    parsed_tokens = int(max_output_tokens)
+                    if parsed_tokens <= 0:
+                        raise ValueError("max_output_tokens must be positive")
+                    self.max_output_tokens = parsed_tokens
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        f"Invalid max_output_tokens value '{max_output_tokens}'. "
+                        f"Falling back to default ({DEFAULT_MAX_OUTPUT_TOKENS})."
+                    )
+                    self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
         self.final_instructions = create_final_system_prompt(
             self.admin_instructions,
@@ -337,8 +359,12 @@ class GeminiRealtimeClient:
             # Wrap function declarations in tools structure (required by Gemini Live API)
             # Format: [{"function_declarations": [...]}]
             tools = None
+            tool_config = None
             if function_declarations:
                 tools = [{"function_declarations": function_declarations}]
+                tool_config = self._build_tool_config(has_tools=True)
+            else:
+                tool_config = None
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -357,7 +383,9 @@ class GeminiRealtimeClient:
                             voice_name=self.voice
                         )
                     )
-                )
+                ),
+                max_output_tokens=self.max_output_tokens,
+                tool_config=tool_config
             )
 
             config = types.LiveConnectConfig(
@@ -397,10 +425,17 @@ class GeminiRealtimeClient:
             )
             self.running = True
 
-            tool_names = [t.get("name", "unknown") for t in function_declarations]
-            self.logger.info(
-                f"[FunctionCall] Configured {len(tools)} Gemini tools: {tool_names}"
-            )
+            if function_declarations:
+                tool_names = [t.get("name", "unknown") for t in function_declarations]
+                fc_mode = None
+                if tool_config and tool_config.function_calling_config:
+                    fc_mode = tool_config.function_calling_config.mode.value
+                mode_label = fc_mode or "AUTO"
+                self.logger.info(
+                    f"[FunctionCall] Configured {len(function_declarations)} Gemini function declarations: {tool_names}; function_calling_mode={mode_label}"
+                )
+            else:
+                self.logger.info("[FunctionCall] Gemini session started without custom tools")
 
             self.retry_count = 0
 
@@ -473,6 +508,8 @@ class GeminiRealtimeClient:
         if not self.running or not self.session:
             self.logger.warning(f"Cannot start receiving: running={self.running}, session={self.session is not None}")
             return
+        self._on_audio_callback = on_audio_callback
+        self._pending_pcmu_bytes.clear()
 
         async def _read_loop():
             try:
@@ -493,7 +530,7 @@ class GeminiRealtimeClient:
 
                                 # Convert PCM16 24kHz to PCMU 8kHz using efficient audioop
                                 pcmu_8k = pcm16_24k_to_pcmu_8k(pcm16_24k)
-                                on_audio_callback(pcmu_8k)
+                                self._buffer_and_emit_pcmu(pcmu_8k)
 
                             except Exception as audio_err:
                                 self.logger.error(f"Error processing audio from Gemini: {audio_err}", exc_info=True)
@@ -510,6 +547,7 @@ class GeminiRealtimeClient:
                             if server_content.turn_complete:
                                 self._response_in_progress = False
                                 self.logger.info("[FunctionCall] Turn complete from Gemini")
+                                self._buffer_and_emit_pcmu(b"", force_flush=True)
 
                                 # Check if we need to disconnect
                                 if self._await_disconnect_on_done and self._disconnect_context:
@@ -547,6 +585,13 @@ class GeminiRealtimeClient:
                             # Handle grounding metadata (if using Google Search)
                             if hasattr(server_content, 'grounding_metadata') and server_content.grounding_metadata:
                                 self.logger.info(f"[Grounding] Received grounding metadata")
+
+                            if getattr(server_content, "interrupted", False):
+                                if self._pending_pcmu_bytes:
+                                    self.logger.info(
+                                        f"Generation interrupted; dropping {len(self._pending_pcmu_bytes)} pending PCMU bytes"
+                                    )
+                                    self._pending_pcmu_bytes.clear()
 
                     except Exception as msg_err:
                         self.logger.error(f"Error processing Gemini message: {msg_err}", exc_info=True)
@@ -702,6 +747,77 @@ class GeminiRealtimeClient:
     def register_genesys_tool_handlers(self, handlers: Optional[Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]]):
         """Register handlers for Genesys data action tools."""
         self.genesys_tool_handlers = handlers or {}
+        handler_count = len(self.genesys_tool_handlers)
+        if handler_count:
+            self.logger.info(f"[FunctionCall] Registered {handler_count} Genesys tool handler(s)")
+
+    def _deliver_pcmu_frame(self, frame: bytes):
+        callback = self._on_audio_callback
+        if not callback:
+            return
+        try:
+            callback(frame)
+        except Exception as callback_err:
+            self.logger.error(f"Error delivering audio frame to Genesys: {callback_err}", exc_info=True)
+
+    def _buffer_and_emit_pcmu(self, pcmu_8k: bytes, force_flush: bool = False):
+        """
+        Accumulate Gemini PCM16→PCMU output and emit fixed-size frames required by Genesys.
+        """
+        if pcmu_8k:
+            self._pending_pcmu_bytes.extend(pcmu_8k)
+
+        if not self._on_audio_callback:
+            return
+
+        while len(self._pending_pcmu_bytes) >= self._pcmu_frame_size:
+            frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
+            del self._pending_pcmu_bytes[:self._pcmu_frame_size]
+            self._deliver_pcmu_frame(frame)
+
+        if force_flush and self._pending_pcmu_bytes:
+            pad_len = (-len(self._pending_pcmu_bytes)) % self._pcmu_frame_size
+            if pad_len:
+                self._pending_pcmu_bytes.extend(
+                    bytes([GENESYS_PCMU_SILENCE_BYTE]) * pad_len
+                )
+            while self._pending_pcmu_bytes:
+                frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
+                del self._pending_pcmu_bytes[:self._pcmu_frame_size]
+                self._deliver_pcmu_frame(frame)
+
+    def _build_tool_config(self, has_tools: bool) -> Optional[types.ToolConfig]:
+        """
+        Translate OpenAI-style tool_choice semantics into Gemini's function calling config.
+        """
+        if not has_tools:
+            return None
+
+        mode = types.FunctionCallingConfigMode.AUTO
+        allowed_function_names = None
+
+        choice = self.custom_tool_choice
+        if isinstance(choice, str):
+            normalized = choice.strip().lower()
+            if normalized in ("none", "disabled"):
+                mode = types.FunctionCallingConfigMode.NONE
+            elif normalized in ("required", "force", "any"):
+                mode = types.FunctionCallingConfigMode.ANY
+            else:
+                mode = types.FunctionCallingConfigMode.AUTO
+        elif isinstance(choice, dict):
+            if choice.get("type") == "function":
+                func_name = (choice.get("function") or {}).get("name")
+                if func_name:
+                    allowed_function_names = [func_name]
+                    mode = types.FunctionCallingConfigMode.VALIDATED
+
+        return types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=mode,
+                allowed_function_names=allowed_function_names
+            )
+        )
 
     async def _handle_genesys_tool_call(self, name: str, call_id: str, args: Dict[str, Any]):
         """Handle Genesys data action tool calls."""
@@ -758,6 +874,9 @@ class GeminiRealtimeClient:
         duration = time.time() - self.start_time
         self.logger.info(f"Closing Gemini connection after {duration:.2f}s")
         self.running = False
+        self._buffer_and_emit_pcmu(b"", force_flush=True)
+        self._pending_pcmu_bytes.clear()
+        self._on_audio_callback = None
 
         # Exit the async context manager if it exists
         if self._session_context:
