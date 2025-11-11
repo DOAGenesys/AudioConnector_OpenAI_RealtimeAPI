@@ -122,6 +122,32 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[types.FunctionDeclaration]:
+    """Convert generic tool definitions into Gemini FunctionDeclaration objects."""
+    declarations: List[types.FunctionDeclaration] = []
+    for tool in tool_defs:
+        if not tool or "name" not in tool:
+            continue
+        cleaned_parameters = None
+        parameters = tool.get("parameters")
+        if isinstance(parameters, dict):
+            cleaned_parameters = _clean_schema_for_gemini(parameters)
+        schema = None
+        if isinstance(cleaned_parameters, dict) and cleaned_parameters:
+            try:
+                schema = types.Schema(**cleaned_parameters)
+            except Exception:
+                schema = cleaned_parameters
+        declarations.append(
+            types.FunctionDeclaration(
+                name=tool["name"],
+                description=tool.get("description", ""),
+                parameters=schema
+            )
+        )
+    return declarations
+
+
 class GeminiRealtimeClient:
     """
     Gemini Live API client that mirrors the OpenAIRealtimeClient interface
@@ -323,6 +349,8 @@ class GeminiRealtimeClient:
         else:
             self.model = default_gemini_model
 
+        logged_function_names: List[str] = []
+
         try:
             self.logger.info(f"Connecting to Gemini Live API using model: {self.model}...")
             connect_start = time.time()
@@ -334,11 +362,11 @@ class GeminiRealtimeClient:
             )
 
             # Build function declarations for Gemini
-            function_declarations = []
+            function_definition_dicts: List[Dict[str, Any]] = []
 
             # Add call control tools
             call_control_tools = _default_call_control_tools()
-            function_declarations.extend(call_control_tools)
+            function_definition_dicts.extend(call_control_tools)
 
             # Add custom tool definitions (Genesys data actions, etc.)
             if self.custom_tool_definitions:
@@ -354,15 +382,23 @@ class GeminiRealtimeClient:
                             "description": tool.get("description", ""),
                             "parameters": cleaned_parameters
                         }
-                        function_declarations.append(func_def)
+                        function_definition_dicts.append(func_def)
 
             # Wrap function declarations in tools structure (required by Gemini Live API)
             # Format: [{"function_declarations": [...]}]
             tools = None
             tool_config = None
-            if function_declarations:
-                tools = [{"function_declarations": function_declarations}]
-                tool_config = self._build_tool_config(has_tools=True)
+            logged_function_names: List[str] = []
+            if function_definition_dicts:
+                logged_function_names = [tool.get("name", "unknown") for tool in function_definition_dicts]
+                gemini_function_declarations = _build_function_declarations(function_definition_dicts)
+                if gemini_function_declarations:
+                    tools = [
+                        types.Tool(
+                            function_declarations=gemini_function_declarations
+                        )
+                    ]
+                tool_config = self._build_tool_config(has_tools=bool(gemini_function_declarations))
             else:
                 tool_config = None
 
@@ -384,14 +420,14 @@ class GeminiRealtimeClient:
                         )
                     )
                 ),
-                max_output_tokens=self.max_output_tokens,
-                tool_config=tool_config
+                max_output_tokens=self.max_output_tokens
             )
 
             config = types.LiveConnectConfig(
                 generation_config=generation_config,
                 system_instruction=instructions_text,
                 tools=tools if tools else None,
+                tool_config=tool_config
             )
 
             # Connect to Live API via async context manager to match SDK docs
@@ -425,14 +461,13 @@ class GeminiRealtimeClient:
             )
             self.running = True
 
-            if function_declarations:
-                tool_names = [t.get("name", "unknown") for t in function_declarations]
+            if tools:
                 fc_mode = None
                 if tool_config and tool_config.function_calling_config:
                     fc_mode = tool_config.function_calling_config.mode.value
                 mode_label = fc_mode or "AUTO"
                 self.logger.info(
-                    f"[FunctionCall] Configured {len(function_declarations)} Gemini function declarations: {tool_names}; function_calling_mode={mode_label}"
+                    f"[FunctionCall] Configured {len(logged_function_names)} Gemini function declarations: {logged_function_names}; function_calling_mode={mode_label}"
                 )
             else:
                 self.logger.info("[FunctionCall] Gemini session started without custom tools")
