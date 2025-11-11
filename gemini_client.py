@@ -828,7 +828,15 @@ class GeminiRealtimeClient:
             return
 
         try:
-            self.logger.info(f"[FunctionCall] Calling handler for Genesys tool {name}")
+            if not isinstance(args, dict):
+                raise ValueError(f"Tool arguments must be a dictionary, got {type(args).__name__}")
+
+            try:
+                args_preview = json.dumps(args)[:512]
+            except Exception:
+                args_preview = str(args)[:512]
+            self.logger.info(f"[FunctionCall] Calling handler for Genesys tool {name} with args: {args_preview}")
+
             result_payload = await handler(args)
 
             if result_payload is None:
@@ -841,7 +849,11 @@ class GeminiRealtimeClient:
                 "result": result_payload
             }
 
-            self.logger.info(f"[FunctionCall] Genesys tool {name} executed successfully")
+            try:
+                result_preview = json.dumps(result_payload)[:1024]
+            except Exception:
+                result_preview = str(result_payload)[:1024]
+            self.logger.info(f"[FunctionCall] Genesys tool {name} executed successfully. Result preview: {result_preview}")
 
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {str(exc)}"
@@ -865,7 +877,9 @@ class GeminiRealtimeClient:
                 function_responses=[function_response]
             )
 
-            self.logger.info(f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})")
+            self.logger.info(
+                f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})"
+            )
         except Exception as send_exc:
             self.logger.error(f"[FunctionCall] CRITICAL ERROR: Failed to send tool result: {send_exc}", exc_info=True)
 
