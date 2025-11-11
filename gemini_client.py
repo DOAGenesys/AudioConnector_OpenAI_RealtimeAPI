@@ -434,7 +434,8 @@ class GeminiRealtimeClient:
             config = types.LiveConnectConfig(
                 generation_config=generation_config,
                 system_instruction=instructions_text,
-                tools=tools if tools else None
+                tools=tools if tools else None,
+                tool_config=tool_config
             )
 
             # Connect to Live API via async context manager to match SDK docs
