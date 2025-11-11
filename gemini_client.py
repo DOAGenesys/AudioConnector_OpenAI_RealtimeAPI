@@ -5,6 +5,7 @@ import time
 import base64
 import io
 import copy
+import sys
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
@@ -365,18 +366,28 @@ class GeminiRealtimeClient:
                 tools=tools if tools else None,
             )
 
-            # Connect to Live API
+            # Connect to Live API via async context manager to match SDK docs
             self.logger.info(f"Initiating Gemini Live API connection with model: {self.model}")
-            self.session = await self.client.aio.live.connect(
+            session_cm = self.client.aio.live.connect(
                 model=self.model,
                 config=config
             )
 
-            # Enter the context manager manually to get the session
-            self.session = await session_cm.__aenter__()
+            try:
+                session = await session_cm.__aenter__()
+            except Exception:
+                exc_type, exc, tb = sys.exc_info()
+                try:
+                    await session_cm.__aexit__(exc_type, exc, tb)
+                except Exception as exit_err:
+                    self.logger.error(
+                        f"Error while cleaning up failed Gemini session enter: {exit_err}",
+                        exc_info=True
+                    )
+                raise
 
-            # Only set _session_context after successful entry
-            # (if __aenter__ fails, we shouldn't call __aexit__)
+            # Only set state after successful context entry
+            self.session = session
             self._session_context = session_cm
 
             connect_time = time.time() - connect_start
