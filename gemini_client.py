@@ -24,7 +24,8 @@ from config import (
     DEBUG,
     GENESYS_RATE_WINDOW,
     GENESYS_PCMU_FRAME_SIZE,
-    GENESYS_PCMU_SILENCE_BYTE
+    GENESYS_PCMU_SILENCE_BYTE,
+    GEMINI_DIAGNOSTICS_SUMMARY
 )
 from utils import (
     format_json,
@@ -195,6 +196,7 @@ class GeminiRealtimeClient:
         self.escalation_prompt = None
         self.success_prompt = None
         self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+        self._diagnostics_enabled = GEMINI_DIAGNOSTICS_SUMMARY
 
         # Token tracking for Gemini
         self._total_prompt_tokens = 0
@@ -614,7 +616,7 @@ class GeminiRealtimeClient:
 
                         # Handle server content (turn completion, tool calls, etc.)
                         if server_content:
-                            if self._debug_enabled():
+                            if self._debug_enabled() or self._diagnostics_enabled_flag():
                                 model_turn = getattr(server_content, "model_turn", None)
                                 server_summary = {
                                     "turn_complete": bool(server_content.turn_complete),
@@ -626,7 +628,11 @@ class GeminiRealtimeClient:
                                     server_summary["grounding_metadata"] = self._coerce_to_serializable(
                                         server_content.grounding_metadata
                                     )
-                                self._debug_log_payload("[FunctionCall] Gemini server_content summary", server_summary, max_chars=4000)
+                                if self._debug_enabled():
+                                    self._debug_log_payload("[FunctionCall] Gemini server_content summary", server_summary, max_chars=4000)
+                                if self._diagnostics_enabled_flag():
+                                    diag_summary = {k: v for k, v in server_summary.items() if k != "grounding_metadata"}
+                                    self._diagnostic_log("server_content", diag_summary)
 
                             # Track tokens
                             if usage_metadata:
@@ -637,6 +643,14 @@ class GeminiRealtimeClient:
                                 self._response_in_progress = False
                                 self.logger.info("[FunctionCall] Turn complete from Gemini")
                                 self._buffer_and_emit_pcmu(b"", force_flush=True)
+                                if self._diagnostics_enabled_flag():
+                                    diag_usage = {
+                                        "prompt_tokens": getattr(usage_metadata, "prompt_token_count", None) if usage_metadata else None,
+                                        "candidate_tokens": getattr(usage_metadata, "candidates_token_count", None) if usage_metadata else None,
+                                        "disconnect_pending": bool(self._await_disconnect_on_done),
+                                        "action_context": self._disconnect_context.get("action") if self._disconnect_context else None
+                                    }
+                                    self._diagnostic_log("turn_complete", diag_usage)
 
                                 # Check if we need to disconnect
                                 if self._await_disconnect_on_done and self._disconnect_context:
@@ -661,25 +675,49 @@ class GeminiRealtimeClient:
                                 self._response_in_progress = True
                                 parts = getattr(model_turn, "parts", None) or []
 
-                                if self._debug_enabled():
-                                    part_summaries = []
+                                part_summaries: List[Dict[str, Any]] = []
+                                diag_function_names: List[Optional[str]] = []
+                                diag_text_parts = 0
+                                diag_part_types: List[str] = []
+
+                                collecting_debug = self._debug_enabled()
+                                collecting_diag = self._diagnostics_enabled_flag()
+
+                                if collecting_debug or collecting_diag:
                                     for idx, part in enumerate(parts):
-                                        part_summary = {
-                                            "index": idx,
-                                            "type": type(part).__name__,
-                                            "has_function_call": bool(getattr(part, "function_call", None)),
-                                            "has_text": bool(getattr(part, "text", None))
-                                        }
+                                        diag_part_types.append(type(part).__name__)
+                                        if getattr(part, "text", None):
+                                            diag_text_parts += 1
                                         func_call = getattr(part, "function_call", None)
                                         if func_call:
-                                            fc_summary = {
-                                                "name": getattr(func_call, "name", None),
-                                                "id": getattr(func_call, "id", None),
-                                                "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
+                                            diag_function_names.append(getattr(func_call, "name", None))
+                                        if collecting_debug:
+                                            part_summary = {
+                                                "index": idx,
+                                                "type": type(part).__name__,
+                                                "has_function_call": bool(func_call),
+                                                "has_text": bool(getattr(part, "text", None))
                                             }
-                                            part_summary["function_call"] = fc_summary
-                                        part_summaries.append(part_summary)
+                                            if func_call:
+                                                fc_summary = {
+                                                    "name": getattr(func_call, "name", None),
+                                                    "id": getattr(func_call, "id", None),
+                                                    "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
+                                                }
+                                                part_summary["function_call"] = fc_summary
+                                            part_summaries.append(part_summary)
+
+                                if collecting_debug and part_summaries:
                                     self._debug_log_payload("[FunctionCall] Gemini model_turn parts", part_summaries, max_chars=6000)
+                                if collecting_diag:
+                                    diag_payload = {
+                                        "total_parts": len(parts),
+                                        "function_call_names": diag_function_names[:5],
+                                        "function_call_count": len(diag_function_names),
+                                        "text_part_count": diag_text_parts,
+                                        "part_types": diag_part_types[:10]
+                                    }
+                                    self._diagnostic_log("model_turn", diag_payload)
 
                                 # Process parts for function calls
                                 for part in parts:
@@ -733,6 +771,14 @@ class GeminiRealtimeClient:
                                     await self._handle_function_call(name, call_id, args)
                                 except Exception as fc_err:
                                     self.logger.error(f"[FunctionCall] Error handling live tool call: {fc_err}", exc_info=True)
+                            if self._diagnostics_enabled_flag():
+                                diag_payload = {
+                                    "live_function_calls": [
+                                        getattr(func_call, "name", None) for func_call in function_calls
+                                    ],
+                                    "count": len(function_calls)
+                                }
+                                self._diagnostic_log("live_tool_call", diag_payload)
 
                         if message.tool_call_cancellation:
                             cancel = message.tool_call_cancellation
@@ -744,6 +790,8 @@ class GeminiRealtimeClient:
                                     "details": self._coerce_to_serializable(cancel)
                                 }
                                 self._debug_log_payload("[FunctionCall] Gemini tool call cancellation", cancel_payload, max_chars=2000)
+                            if self._diagnostics_enabled_flag():
+                                self._diagnostic_log("tool_call_cancellation", {"id": cancel_id})
 
                     except Exception as msg_err:
                         self.logger.error(f"Error processing Gemini message: {msg_err}", exc_info=True)
@@ -827,6 +875,13 @@ class GeminiRealtimeClient:
                     args or {},
                     max_chars=2000
                 )
+            if self._diagnostics_enabled_flag():
+                diag_payload = {
+                    "name": name,
+                    "call_id": call_id,
+                    "arg_keys": sorted(list((args or {}).keys()))
+                }
+                self._diagnostic_log("function_call_received", diag_payload)
 
             if not name:
                 self.logger.error(f"[FunctionCall] ERROR: Function name is empty for call_id={call_id}")
@@ -972,6 +1027,15 @@ class GeminiRealtimeClient:
         preview = self._debug_preview(payload, max_chars=max_chars)
         self.logger.debug(f"{label}: {preview}")
 
+    def _diagnostics_enabled_flag(self) -> bool:
+        return bool(self._diagnostics_enabled)
+
+    def _diagnostic_log(self, label: str, payload: Any, max_chars: int = 1200):
+        if not self._diagnostics_enabled_flag():
+            return
+        preview = self._debug_preview(payload, max_chars=max_chars)
+        self.logger.info(f"[GeminiDiag] {label}: {preview}")
+
     def _debug_preview(self, payload: Any, max_chars: int = 4000) -> str:
         try:
             serializable = self._coerce_to_serializable(payload)
@@ -1109,6 +1173,16 @@ class GeminiRealtimeClient:
                 f"[FunctionCall] Genesys tool response payload name={name} id={call_id}",
                 output_payload,
                 max_chars=3000
+            )
+        if self._diagnostics_enabled_flag():
+            self._diagnostic_log(
+                "genesys_tool_result",
+                {
+                    "tool": name,
+                    "call_id": call_id,
+                    "status": output_payload.get("status"),
+                    "error_type": output_payload.get("error_type")
+                }
             )
 
         try:
