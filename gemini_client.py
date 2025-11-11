@@ -435,6 +435,11 @@ class GeminiRealtimeClient:
             if tool_config:
                 generation_config_kwargs["tool_config"] = tool_config
 
+            fc_mode_value = None
+            if tool_config and getattr(tool_config, "function_calling_config", None):
+                mode_attr = getattr(tool_config.function_calling_config, "mode", None)
+                fc_mode_value = getattr(mode_attr, "value", mode_attr)
+
             generation_config = types.GenerateContentConfig(**generation_config_kwargs)
 
             config = types.LiveConnectConfig(
@@ -442,6 +447,20 @@ class GeminiRealtimeClient:
                 system_instruction=instructions_text,
                 tools=tools if tools else None
             )
+
+            if self._debug_enabled():
+                tool_config_mode = fc_mode_value or ("AUTO" if tools else "DISABLED")
+                debug_connect_payload = {
+                    "model": self.model,
+                    "voice": self.voice,
+                    "temperature": self.temperature,
+                    "max_output_tokens": self.max_output_tokens,
+                    "tool_names": logged_function_names,
+                    "tool_choice": self.custom_tool_choice,
+                    "tool_config_mode": tool_config_mode,
+                    "instructions_preview": instructions_text[:800] if instructions_text else None
+                }
+                self._debug_log_payload("[FunctionCall] Gemini connect configuration", debug_connect_payload)
 
             # Connect to Live API via async context manager to match SDK docs
             self.logger.info(f"Initiating Gemini Live API connection with model: {self.model}")
@@ -475,10 +494,7 @@ class GeminiRealtimeClient:
             self.running = True
 
             if tools:
-                fc_mode = None
-                if tool_config and tool_config.function_calling_config:
-                    fc_mode = tool_config.function_calling_config.mode.value
-                mode_label = fc_mode or "AUTO"
+                mode_label = fc_mode_value or "AUTO"
                 self.logger.info(
                     f"[FunctionCall] Configured {len(logged_function_names)} Gemini function declarations: {logged_function_names}; function_calling_mode={mode_label}"
                 )
@@ -566,8 +582,21 @@ class GeminiRealtimeClient:
                         break
 
                     try:
-                        if DEBUG == 'true':
-                            self.logger.debug(f"Received from Gemini: {type(message).__name__}")
+                        server_content = getattr(message, "server_content", None)
+                        usage_metadata = getattr(message, "usage_metadata", None)
+
+                        if self._debug_enabled():
+                            message_summary = {
+                                "message_type": type(message).__name__,
+                                "has_data": message.data is not None,
+                                "data_bytes": len(message.data) if message.data else 0,
+                                "has_server_content": bool(server_content),
+                                "has_tool_call": bool(getattr(message, "tool_call", None)),
+                                "has_tool_call_cancellation": bool(getattr(message, "tool_call_cancellation", None))
+                            }
+                            if usage_metadata:
+                                message_summary["usage_metadata"] = self._coerce_to_serializable(usage_metadata)
+                            self._debug_log_payload("[FunctionCall] Gemini live message", message_summary, max_chars=4000)
 
                         # Handle audio data
                         if message.data is not None:
@@ -584,12 +613,24 @@ class GeminiRealtimeClient:
                                 self.logger.error(f"Error processing audio from Gemini: {audio_err}", exc_info=True)
 
                         # Handle server content (turn completion, tool calls, etc.)
-                        if message.server_content:
-                            server_content = message.server_content
+                        if server_content:
+                            if self._debug_enabled():
+                                model_turn = getattr(server_content, "model_turn", None)
+                                server_summary = {
+                                    "turn_complete": bool(server_content.turn_complete),
+                                    "interrupted": getattr(server_content, "interrupted", False),
+                                    "has_model_turn": bool(model_turn),
+                                    "model_turn_parts": len(getattr(model_turn, "parts", None) or [])
+                                }
+                                if getattr(server_content, "grounding_metadata", None):
+                                    server_summary["grounding_metadata"] = self._coerce_to_serializable(
+                                        server_content.grounding_metadata
+                                    )
+                                self._debug_log_payload("[FunctionCall] Gemini server_content summary", server_summary, max_chars=4000)
 
                             # Track tokens
-                            if message.usage_metadata:
-                                await self._update_token_metrics(message.usage_metadata)
+                            if usage_metadata:
+                                await self._update_token_metrics(usage_metadata)
 
                             # Handle turn complete
                             if server_content.turn_complete:
@@ -615,12 +656,33 @@ class GeminiRealtimeClient:
                                         self.logger.error(f"[FunctionCall] Exception invoking disconnect callback: {e}", exc_info=True)
 
                             # Handle model turn (contains function calls)
-                            if server_content.model_turn:
-                                model_turn = server_content.model_turn
+                            model_turn = getattr(server_content, "model_turn", None)
+                            if model_turn:
                                 self._response_in_progress = True
+                                parts = getattr(model_turn, "parts", None) or []
+
+                                if self._debug_enabled():
+                                    part_summaries = []
+                                    for idx, part in enumerate(parts):
+                                        part_summary = {
+                                            "index": idx,
+                                            "type": type(part).__name__,
+                                            "has_function_call": bool(getattr(part, "function_call", None)),
+                                            "has_text": bool(getattr(part, "text", None))
+                                        }
+                                        func_call = getattr(part, "function_call", None)
+                                        if func_call:
+                                            fc_summary = {
+                                                "name": getattr(func_call, "name", None),
+                                                "id": getattr(func_call, "id", None),
+                                                "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
+                                            }
+                                            part_summary["function_call"] = fc_summary
+                                        part_summaries.append(part_summary)
+                                    self._debug_log_payload("[FunctionCall] Gemini model_turn parts", part_summaries, max_chars=6000)
 
                                 # Process parts for function calls
-                                for part in model_turn.parts:
+                                for part in parts:
                                     if part.function_call:
                                         func_call = part.function_call
                                         name = func_call.name
@@ -628,6 +690,12 @@ class GeminiRealtimeClient:
                                         call_id = func_call.id if hasattr(func_call, 'id') else str(time.time())
 
                                         self.logger.info(f"[FunctionCall] Detected function call: name={name}, id={call_id}")
+                                        if self._debug_enabled():
+                                            self._debug_log_payload(
+                                                f"[FunctionCall] Gemini function call args name={name} id={call_id}",
+                                                args or {},
+                                                max_chars=2000
+                                            )
                                         await self._handle_function_call(name, call_id, args)
 
                             # Handle grounding metadata (if using Google Search)
@@ -644,6 +712,17 @@ class GeminiRealtimeClient:
                         # Handle live tool calls emitted outside of server_content (Bidi tool stream)
                         if message.tool_call and getattr(message.tool_call, "function_calls", None):
                             function_calls = message.tool_call.function_calls or []
+                            if self._debug_enabled():
+                                tool_call_summary = []
+                                for func_call in function_calls:
+                                    tool_call_summary.append(
+                                        {
+                                            "id": getattr(func_call, "id", None),
+                                            "name": getattr(func_call, "name", None),
+                                            "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
+                                        }
+                                    )
+                                self._debug_log_payload("[FunctionCall] Gemini live tool_call payload", tool_call_summary, max_chars=6000)
                             self.logger.info(f"[FunctionCall] Received {len(function_calls)} Gemini tool call(s)")
                             for func_call in function_calls:
                                 try:
@@ -659,6 +738,12 @@ class GeminiRealtimeClient:
                             cancel = message.tool_call_cancellation
                             cancel_id = getattr(cancel, "id", "unknown")
                             self.logger.warning(f"[FunctionCall] Gemini cancelled tool call id={cancel_id}")
+                            if self._debug_enabled():
+                                cancel_payload = {
+                                    "id": cancel_id,
+                                    "details": self._coerce_to_serializable(cancel)
+                                }
+                                self._debug_log_payload("[FunctionCall] Gemini tool call cancellation", cancel_payload, max_chars=2000)
 
                     except Exception as msg_err:
                         self.logger.error(f"Error processing Gemini message: {msg_err}", exc_info=True)
@@ -736,6 +821,12 @@ class GeminiRealtimeClient:
         """Handle function calls from Gemini."""
         try:
             self.logger.info(f"[FunctionCall] Handling function call: name={name}, call_id={call_id}")
+            if self._debug_enabled():
+                self._debug_log_payload(
+                    f"[FunctionCall] Received args for {name} (call_id={call_id})",
+                    args or {},
+                    max_chars=2000
+                )
 
             if not name:
                 self.logger.error(f"[FunctionCall] ERROR: Function name is empty for call_id={call_id}")
@@ -782,6 +873,19 @@ class GeminiRealtimeClient:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}")
                 output_payload = {"result": "error", "error": f"Unknown function: {name}"}
 
+            if self._debug_enabled():
+                response_debug = {
+                    "action": action,
+                    "info": info,
+                    "output_payload": output_payload,
+                    "closing_instruction": closing_instruction
+                }
+                self._debug_log_payload(
+                    f"[FunctionCall] Gemini function response payload name={name} id={call_id}",
+                    response_debug,
+                    max_chars=3000
+                )
+
             # Send function response back to Gemini
             function_response = types.FunctionResponse(
                 id=call_id,
@@ -796,6 +900,12 @@ class GeminiRealtimeClient:
             self.logger.info(f"[FunctionCall] Sent function response for {name} (call_id={call_id})")
 
             if closing_instruction and self._disconnect_context:
+                if self._debug_enabled():
+                    self._debug_log_payload(
+                        "[FunctionCall] Closing instruction to Gemini",
+                        {"closing_instruction": closing_instruction},
+                        max_chars=1000
+                    )
                 # Send the closing instruction to make Gemini say the farewell
                 await self.session.send_client_content(
                     turns=types.Content(
@@ -853,6 +963,61 @@ class GeminiRealtimeClient:
                 del self._pending_pcmu_bytes[:self._pcmu_frame_size]
                 self._deliver_pcmu_frame(frame)
 
+    def _debug_enabled(self) -> bool:
+        return DEBUG == 'true'
+
+    def _debug_log_payload(self, label: str, payload: Any, max_chars: int = 4000):
+        if not self._debug_enabled():
+            return
+        preview = self._debug_preview(payload, max_chars=max_chars)
+        self.logger.debug(f"{label}: {preview}")
+
+    def _debug_preview(self, payload: Any, max_chars: int = 4000) -> str:
+        try:
+            serializable = self._coerce_to_serializable(payload)
+            if isinstance(serializable, dict):
+                preview = format_json(serializable)
+            elif isinstance(serializable, (list, tuple)):
+                preview = json.dumps(serializable, indent=2, default=str)
+            else:
+                preview = str(serializable)
+        except Exception as exc:
+            preview = f"<unserializable {type(payload).__name__}: {exc}>"
+
+        if len(preview) > max_chars:
+            preview = preview[:max_chars] + "... [truncated]"
+        return preview
+
+    def _coerce_to_serializable(self, payload: Any):
+        if payload is None or isinstance(payload, (str, int, float, bool)):
+            return payload
+        if isinstance(payload, bytes):
+            return f"<bytes len={len(payload)}>"
+        if isinstance(payload, dict):
+            return {k: self._coerce_to_serializable(v) for k, v in payload.items()}
+        if isinstance(payload, (list, tuple)):
+            return [self._coerce_to_serializable(item) for item in payload]
+        if hasattr(payload, "model_dump"):
+            try:
+                return payload.model_dump()
+            except Exception:
+                pass
+        if hasattr(payload, "to_dict"):
+            try:
+                return payload.to_dict()
+            except Exception:
+                pass
+        if hasattr(payload, "__dict__"):
+            try:
+                return {
+                    k: self._coerce_to_serializable(v)
+                    for k, v in payload.__dict__.items()
+                    if not k.startswith("_")
+                }
+            except Exception:
+                pass
+        return str(payload)
+
     def _build_tool_config(self, has_tools: bool) -> Optional[types.ToolConfig]:
         """
         Translate OpenAI-style tool_choice semantics into Gemini's function calling config.
@@ -894,6 +1059,7 @@ class GeminiRealtimeClient:
             self.logger.error(f"[FunctionCall] ERROR: {error_msg}")
             return
 
+        output_payload: Dict[str, Any]
         try:
             if not isinstance(args, dict):
                 raise ValueError(f"Tool arguments must be a dictionary, got {type(args).__name__}")
@@ -903,6 +1069,12 @@ class GeminiRealtimeClient:
             except Exception:
                 args_preview = str(args)[:512]
             self.logger.info(f"[FunctionCall] Calling handler for Genesys tool {name} with args: {args_preview}")
+            if self._debug_enabled():
+                self._debug_log_payload(
+                    f"[FunctionCall] Genesys tool args name={name} id={call_id}",
+                    args or {},
+                    max_chars=2000
+                )
 
             result_payload = await handler(args)
 
@@ -931,6 +1103,13 @@ class GeminiRealtimeClient:
                 "error_type": type(exc).__name__,
                 "message": error_msg
             }
+
+        if self._debug_enabled():
+            self._debug_log_payload(
+                f"[FunctionCall] Genesys tool response payload name={name} id={call_id}",
+                output_payload,
+                max_chars=3000
+            )
 
         try:
             # Send function response back to Gemini
