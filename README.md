@@ -218,7 +218,7 @@ If you don't have already one, you can get a DigitalOcean account with 200$ in f
 ### Audio Connector Integration
 
 1. Create new Audio Connector integration
-2. Configure WebSocket endpoint: `wss://your-app-domain.ondigitalocean.app/audiohook`
+2. Configure WebSocket endpoint: `wss://<your-app-domain>.ondigitalocean.app/audiohook`
 3. Set API Key header with your `GENESYS_API_KEY` value
 4. Save and activate integration
 
