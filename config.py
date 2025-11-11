@@ -198,6 +198,9 @@ GENESYS_BINARY_BURST_LIMIT = 30      # Audio frame burst capacity (conservative)
 GENESYS_RATE_WINDOW = 1.0            # Rate limit window in seconds
 
 LOG_FILE = "logging.txt"
+
+# Gemini diagnostics
+GEMINI_DIAGNOSTICS_SUMMARY = _str_to_bool(os.getenv('GEMINI_DIAGNOSTICS_SUMMARY', 'false'))
 LOGGING_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
 
 if os.path.exists(LOG_FILE):
