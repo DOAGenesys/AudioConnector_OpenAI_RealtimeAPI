@@ -122,32 +122,6 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
-def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[types.FunctionDeclaration]:
-    """Convert generic tool definitions into Gemini FunctionDeclaration objects."""
-    declarations: List[types.FunctionDeclaration] = []
-    for tool in tool_defs:
-        if not tool or "name" not in tool:
-            continue
-        cleaned_parameters = None
-        parameters = tool.get("parameters")
-        if isinstance(parameters, dict):
-            cleaned_parameters = _clean_schema_for_gemini(parameters)
-        schema = None
-        if isinstance(cleaned_parameters, dict) and cleaned_parameters:
-            try:
-                schema = types.Schema(**cleaned_parameters)
-            except Exception:
-                schema = cleaned_parameters
-        declarations.append(
-            types.FunctionDeclaration(
-                name=tool["name"],
-                description=tool.get("description", ""),
-                parameters=schema
-            )
-        )
-    return declarations
-
-
 class GeminiRealtimeClient:
     """
     Gemini Live API client that mirrors the OpenAIRealtimeClient interface
@@ -426,8 +400,7 @@ class GeminiRealtimeClient:
             config = types.LiveConnectConfig(
                 generation_config=generation_config,
                 system_instruction=instructions_text,
-                tools=tools if tools else None,
-                tool_config=tool_config
+                tools=tools if tools else None
             )
 
             # Connect to Live API via async context manager to match SDK docs
