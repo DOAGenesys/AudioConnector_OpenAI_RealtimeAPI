@@ -122,6 +122,40 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[types.FunctionDeclaration]:
+    """
+    Convert OpenAI-style tool definitions into Gemini FunctionDeclaration objects.
+
+    Gemini expects a list of Tool objects, where each Tool wraps the function declarations.
+    This helper normalizes the schemas and instantiates `types.FunctionDeclaration` instances
+    the Live API can consume.
+    """
+    declarations: List[types.FunctionDeclaration] = []
+    for tool in tool_defs:
+        if not tool or "name" not in tool:
+            continue
+        cleaned_parameters = None
+        parameters = tool.get("parameters")
+        if isinstance(parameters, dict):
+            cleaned_parameters = _clean_schema_for_gemini(parameters)
+        schema = None
+        if isinstance(cleaned_parameters, dict) and cleaned_parameters:
+            try:
+                schema = types.Schema(**cleaned_parameters)
+            except Exception:
+                # If the schema cannot be coerced into a pydantic Schema, fall back
+                # to the raw dict so the caller still has a best-effort definition.
+                schema = cleaned_parameters
+        declarations.append(
+            types.FunctionDeclaration(
+                name=tool["name"],
+                description=tool.get("description", ""),
+                parameters=schema
+            )
+        )
+    return declarations
+
+
 class GeminiRealtimeClient:
     """
     Gemini Live API client that mirrors the OpenAIRealtimeClient interface
