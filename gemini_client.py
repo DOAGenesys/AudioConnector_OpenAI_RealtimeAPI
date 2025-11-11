@@ -430,6 +430,8 @@ class GeminiRealtimeClient:
                 ),
                 "max_output_tokens": self.max_output_tokens
             }
+            if tools:
+                generation_config_kwargs["tools"] = tools
             if tool_config:
                 generation_config_kwargs["tool_config"] = tool_config
 
