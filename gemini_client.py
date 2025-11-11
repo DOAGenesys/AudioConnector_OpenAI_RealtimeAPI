@@ -123,15 +123,17 @@ def _default_call_control_tools() -> List[Dict[str, Any]]:
     ]
 
 
-def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[types.FunctionDeclaration]:
+def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Convert OpenAI-style tool definitions into Gemini FunctionDeclaration objects.
+    Convert OpenAI-style tool definitions into Gemini function declaration payloads.
 
-    Gemini expects a list of Tool objects, where each Tool wraps the function declarations.
-    This helper normalizes the schemas and instantiates `types.FunctionDeclaration` instances
-    the Live API can consume.
+    Gemini expects snake_case JSON schema fields (matching OpenAPI) while the SDK's
+    typed helpers convert enum values to uppercase. Instead of relying on the SDK
+    models (which would upcase the schema `type` fields and break validation), build
+    lightweight dicts that mirror the REST format documented in
+    https://ai.google.dev/gemini-api/docs/function-calling.
     """
-    declarations: List[types.FunctionDeclaration] = []
+    declarations: List[Dict[str, Any]] = []
     for tool in tool_defs:
         if not tool or "name" not in tool:
             continue
@@ -139,21 +141,11 @@ def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[types.
         parameters = tool.get("parameters")
         if isinstance(parameters, dict):
             cleaned_parameters = _clean_schema_for_gemini(parameters)
-        schema = None
-        if isinstance(cleaned_parameters, dict) and cleaned_parameters:
-            try:
-                schema = types.Schema(**cleaned_parameters)
-            except Exception:
-                # If the schema cannot be coerced into a pydantic Schema, fall back
-                # to the raw dict so the caller still has a best-effort definition.
-                schema = cleaned_parameters
-        declarations.append(
-            types.FunctionDeclaration(
-                name=tool["name"],
-                description=tool.get("description", ""),
-                parameters=schema
-            )
-        )
+        declarations.append({
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": cleaned_parameters if cleaned_parameters else None
+        })
     return declarations
 
 
@@ -404,9 +396,9 @@ class GeminiRealtimeClient:
                 gemini_function_declarations = _build_function_declarations(function_definition_dicts)
                 if gemini_function_declarations:
                     tools = [
-                        types.Tool(
-                            function_declarations=gemini_function_declarations
-                        )
+                        {
+                            "function_declarations": gemini_function_declarations
+                        }
                     ]
                 tool_config = self._build_tool_config(has_tools=bool(gemini_function_declarations))
             else:
@@ -420,35 +412,37 @@ class GeminiRealtimeClient:
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
             # Build generation config with temperature
-            generation_config_kwargs = {
+            speech_config_payload = {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": self.voice
+                    }
+                }
+            }
+            generation_config_payload: Dict[str, Any] = {
                 "temperature": self.temperature,
                 "response_modalities": ["AUDIO"],
-                "speech_config": types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=self.voice
-                        )
-                    )
-                ),
-                "max_output_tokens": self.max_output_tokens
+                "speech_config": speech_config_payload
             }
-            if tools:
-                generation_config_kwargs["tools"] = tools
-            if tool_config:
-                generation_config_kwargs["tool_config"] = tool_config
+            if self.max_output_tokens is not None:
+                generation_config_payload["max_output_tokens"] = self.max_output_tokens
 
             fc_mode_value = None
             if tool_config and getattr(tool_config, "function_calling_config", None):
                 mode_attr = getattr(tool_config.function_calling_config, "mode", None)
                 fc_mode_value = getattr(mode_attr, "value", mode_attr)
+                generation_config_payload["tool_config"] = tool_config.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=True
+                )
 
-            generation_config = types.GenerateContentConfig(**generation_config_kwargs)
-
-            config = types.LiveConnectConfig(
-                generation_config=generation_config,
-                system_instruction=instructions_text,
-                tools=tools if tools else None
-            )
+            config_payload: Dict[str, Any] = {
+                "generation_config": generation_config_payload,
+                "system_instruction": instructions_text
+            }
+            if tools:
+                config_payload["tools"] = tools
 
             if self._debug_enabled():
                 tool_config_mode = fc_mode_value or ("AUTO" if tools else "DISABLED")
@@ -468,7 +462,7 @@ class GeminiRealtimeClient:
             self.logger.info(f"Initiating Gemini Live API connection with model: {self.model}")
             session_cm = self.client.aio.live.connect(
                 model=self.model,
-                config=config
+                config=config_payload
             )
 
             try:
