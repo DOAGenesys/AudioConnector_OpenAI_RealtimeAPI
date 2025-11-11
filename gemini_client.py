@@ -639,6 +639,25 @@ class GeminiRealtimeClient:
                                     )
                                     self._pending_pcmu_bytes.clear()
 
+                        # Handle live tool calls emitted outside of server_content (Bidi tool stream)
+                        if message.tool_call and getattr(message.tool_call, "function_calls", None):
+                            function_calls = message.tool_call.function_calls or []
+                            self.logger.info(f"[FunctionCall] Received {len(function_calls)} Gemini tool call(s)")
+                            for func_call in function_calls:
+                                try:
+                                    name = getattr(func_call, "name", None)
+                                    args = getattr(func_call, "args", {}) or {}
+                                    call_id = getattr(func_call, "id", None) or str(time.time())
+                                    self.logger.info(f"[FunctionCall] Detected live tool call: name={name}, id={call_id}")
+                                    await self._handle_function_call(name, call_id, args)
+                                except Exception as fc_err:
+                                    self.logger.error(f"[FunctionCall] Error handling live tool call: {fc_err}", exc_info=True)
+
+                        if message.tool_call_cancellation:
+                            cancel = message.tool_call_cancellation
+                            cancel_id = getattr(cancel, "id", "unknown")
+                            self.logger.warning(f"[FunctionCall] Gemini cancelled tool call id={cancel_id}")
+
                     except Exception as msg_err:
                         self.logger.error(f"Error processing Gemini message: {msg_err}", exc_info=True)
 
