@@ -418,24 +418,27 @@ class GeminiRealtimeClient:
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
 
             # Build generation config with temperature
-            generation_config = types.GenerateContentConfig(
-                temperature=self.temperature,
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
+            generation_config_kwargs = {
+                "temperature": self.temperature,
+                "response_modalities": ["AUDIO"],
+                "speech_config": types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
                             voice_name=self.voice
                         )
                     )
                 ),
-                max_output_tokens=self.max_output_tokens
-            )
+                "max_output_tokens": self.max_output_tokens
+            }
+            if tool_config:
+                generation_config_kwargs["tool_config"] = tool_config
+
+            generation_config = types.GenerateContentConfig(**generation_config_kwargs)
 
             config = types.LiveConnectConfig(
                 generation_config=generation_config,
                 system_instruction=instructions_text,
-                tools=tools if tools else None,
-                tool_config=tool_config
+                tools=tools if tools else None
             )
 
             # Connect to Live API via async context manager to match SDK docs
