@@ -5,7 +5,6 @@ import time
 import base64
 import io
 import copy
-import sys
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
@@ -390,6 +389,7 @@ class GeminiRealtimeClient:
             # Format: [{"function_declarations": [...]}]
             tools = None
             tool_config = None
+            tool_config_payload: Optional[Dict[str, Any]] = None
             logged_function_names: List[str] = []
             if function_definition_dicts:
                 logged_function_names = [tool.get("name", "unknown") for tool in function_definition_dicts]
@@ -431,9 +431,7 @@ class GeminiRealtimeClient:
             if tool_config and getattr(tool_config, "function_calling_config", None):
                 mode_attr = getattr(tool_config.function_calling_config, "mode", None)
                 fc_mode_value = getattr(mode_attr, "value", mode_attr)
-                generation_config_payload["tool_config"] = tool_config.model_dump(
-                    mode="json",
-                    by_alias=True,
+                tool_config_payload = tool_config.model_dump(
                     exclude_none=True
                 )
 
@@ -443,6 +441,8 @@ class GeminiRealtimeClient:
             }
             if tools:
                 config_payload["tools"] = tools
+            if tool_config_payload:
+                config_payload["tool_config"] = tool_config_payload
 
             if self._debug_enabled():
                 tool_config_mode = fc_mode_value or ("AUTO" if tools else "DISABLED")
@@ -465,18 +465,7 @@ class GeminiRealtimeClient:
                 config=config_payload
             )
 
-            try:
-                session = await session_cm.__aenter__()
-            except Exception:
-                exc_type, exc, tb = sys.exc_info()
-                try:
-                    await session_cm.__aexit__(exc_type, exc, tb)
-                except Exception as exit_err:
-                    self.logger.error(
-                        f"Error while cleaning up failed Gemini session enter: {exit_err}",
-                        exc_info=True
-                    )
-                raise
+            session = await session_cm.__aenter__()
 
             # Only set state after successful context entry
             self.session = session
@@ -1229,12 +1218,17 @@ class GeminiRealtimeClient:
     async def await_summary(self, timeout: float = 10.0):
         """Generate a summary of the conversation."""
         # For Gemini, we can request a summary by sending a specific prompt
+        session = self.session
+        if not session:
+            self.logger.warning("Cannot generate summary: no active Gemini session")
+            return None
+
         loop = asyncio.get_event_loop()
         self._summary_future = loop.create_future()
 
         try:
             # Send summary request
-            await self.session.send_client_content(
+            await session.send_client_content(
                 turns=types.Content(
                     role="user",
                     parts=[types.Part(text="""
@@ -1253,6 +1247,9 @@ Please analyze this conversation and provide a structured summary including:
             return await asyncio.wait_for(self._summary_future, timeout=timeout)
         except asyncio.TimeoutError:
             self.logger.error("Timeout generating summary")
+            return None
+        except Exception as exc:
+            self.logger.error(f"Error requesting Gemini summary: {exc}")
             return None
         finally:
             self._summary_future = None
