@@ -38,6 +38,8 @@ from utils import (
 PCM16_SILENCE_AMPLITUDE_FLOOR = 750  # Empirically chosen to treat < ~2% full-scale as silence
 AUTOMATIC_VAD_SILENCE_MS = 900       # Aligns with Gemini docs (~1s pause flush)
 AUTOMATIC_VAD_PREFIX_PADDING_MS = 60
+MANUAL_VAD_IDLE_TIMEOUT_SECONDS = 1.0
+IDLE_WATCH_INTERVAL_SECONDS = 0.2
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
@@ -235,6 +237,9 @@ class GeminiRealtimeClient:
         self._pcm16_silence_floor = PCM16_SILENCE_AMPLITUDE_FLOOR
         self._manual_activity_detection = True
         self._activity_in_progress = False
+        self._last_audio_frame_time = 0.0
+        self._silence_monitor_task: Optional[asyncio.Task] = None
+        self._pending_transcript: List[str] = []
 
         # Gemini client and session context
         self.client = None
@@ -489,6 +494,8 @@ class GeminiRealtimeClient:
                 f"(model={self.model}, voice={self.voice}, temperature={self.temperature})"
             )
             self.running = True
+            self._last_audio_frame_time = time.monotonic()
+            self._start_silence_monitor()
 
             if has_tools and gemini_function_declarations:
                 mode_label = fc_mode_value or "AUTO"
@@ -604,6 +611,7 @@ class GeminiRealtimeClient:
 
         try:
             pcm16_8k = decode_pcmu_to_pcm16(pcmu_8k)
+            self._last_audio_frame_time = time.monotonic()
             silence_frame = self._is_silence_frame(pcmu_8k, pcm16_8k)
             if silence_frame:
                 self._consecutive_silence_frames += 1
@@ -658,6 +666,27 @@ class GeminiRealtimeClient:
             self.logger.error(f"Error sending activity_end: {exc}", exc_info=True)
         finally:
             self._activity_in_progress = False
+            self._pending_transcript.clear()
+
+    async def _handle_input_transcription(self, transcription):
+        """
+        Accumulate partial transcripts and finalize the user turn when Gemini marks it finished.
+        """
+        try:
+            text_fragment = (getattr(transcription, "text", "") or "").strip()
+            finished = bool(getattr(transcription, "finished", False))
+        except Exception:
+            text_fragment = ""
+            finished = False
+
+        if text_fragment:
+            self._pending_transcript.append(text_fragment)
+
+        if finished:
+            transcript_text = " ".join(self._pending_transcript).strip()
+            if transcript_text:
+                self.logger.info(f"[Gemini] Final input transcript captured: '{transcript_text}'")
+            await self._flush_audio_stream_if_needed(force=True)
 
     async def start_receiving(self, on_audio_callback):
         """Start receiving responses from Gemini."""
@@ -730,6 +759,7 @@ class GeminiRealtimeClient:
                                     f"[Gemini] Input transcription: '{input_transcription.text}' "
                                     f"(final={getattr(input_transcription, 'finished', False)})"
                                 )
+                                await self._handle_input_transcription(input_transcription)
                             output_transcription = getattr(server_content, "output_transcription", None)
                             if output_transcription and getattr(output_transcription, "text", None):
                                 self.logger.debug(
@@ -1417,6 +1447,13 @@ class GeminiRealtimeClient:
             except asyncio.CancelledError:
                 pass
             self.read_task = None
+        if self._silence_monitor_task:
+            self._silence_monitor_task.cancel()
+            try:
+                await self._silence_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._silence_monitor_task = None
 
     async def await_summary(self, timeout: float = 10.0):
         """Generate a summary of the conversation."""
@@ -1474,3 +1511,26 @@ Please analyze this conversation and provide a structured summary including:
             "TOTAL_OUTPUT_TEXT_TOKENS": str(self._token_details.get('output_text_tokens', 0)),
             "TOTAL_OUTPUT_AUDIO_TOKENS": str(self._token_details.get('output_audio_tokens', 0))
         }
+    def _start_silence_monitor(self):
+        if self._silence_monitor_task and not self._silence_monitor_task.done():
+            return
+
+        async def _monitor():
+            try:
+                while self.running:
+                    await asyncio.sleep(IDLE_WATCH_INTERVAL_SECONDS)
+                    await self._check_idle_timeout()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self.logger.error(f"[Gemini] Silence monitor error: {exc}", exc_info=True)
+
+        self._silence_monitor_task = asyncio.create_task(_monitor())
+
+    async def _check_idle_timeout(self):
+        if not self._audio_stream_open:
+            return
+        if not self._last_audio_frame_time:
+            return
+        if (time.monotonic() - self._last_audio_frame_time) >= MANUAL_VAD_IDLE_TIMEOUT_SECONDS:
+            await self._flush_audio_stream_if_needed(force=True)
