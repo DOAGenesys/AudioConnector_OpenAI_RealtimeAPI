@@ -5,6 +5,7 @@ import logging
 import websockets
 import http
 import os
+from typing import List
 
 try:
     from websockets.asyncio.server import ServerConnection as _ServerConnection
@@ -26,7 +27,17 @@ from utils import format_json
 from datetime import datetime
 
 async def validate_request(path_or_connection, headers_or_request):
-    logger.info(f"\n{'='*50}\n[HTTP] Incoming request validation")
+    log_buffer: List[str] = []
+
+    def _buffer_info(message: str):
+        log_buffer.append(message)
+
+    def _flush_buffer():
+        for entry in log_buffer:
+            logger.info(entry)
+        log_buffer.clear()
+
+    _buffer_info(f"\n{'='*50}\n[HTTP] Incoming request validation")
     connection = None
     request = None
 
@@ -52,8 +63,8 @@ async def validate_request(path_or_connection, headers_or_request):
         if request_path is None:
             request_path = str(path_value)
 
-    logger.info(f"[HTTP] Request path: {request_path}")
-    logger.info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
+    _buffer_info(f"[HTTP] Request path: {request_path}")
+    _buffer_info(f"[HTTP] Expected WebSocket path: {GENESYS_PATH}")
 
     def build_header_map(source):
         pairs = None
@@ -81,14 +92,16 @@ async def validate_request(path_or_connection, headers_or_request):
     else:
         remote_repr = header_keys.get('host', 'unknown')
 
-    logger.info(f"[HTTP] Remote address: {remote_repr}")
+    _buffer_info(f"[HTTP] Remote address: {remote_repr}")
 
-    logger.info("[HTTP] Full headers received:")
+    header_lines: List[str] = ["[HTTP] Full headers received:"]
     for name, value in header_keys.items():
         if name in ['x-api-key', 'authorization']:
-            logger.info(f"[HTTP]   {name}: {'*' * 8}")
+            header_lines.append(f"[HTTP]   {name}: {'*' * 8}")
         else:
-            logger.info(f"[HTTP]   {name}: {value}")
+            header_lines.append(f"[HTTP]   {name}: {value}")
+    for line in header_lines:
+        _buffer_info(line)
 
     upgrade_header = header_keys.get('upgrade', '').lower()
 
@@ -99,8 +112,10 @@ async def validate_request(path_or_connection, headers_or_request):
 
     if request_path == '/' or request_path == '':
         if upgrade_header != 'websocket':
-            logger.info("[HTTP] Health check request detected at root path, returning 200 OK")
+            logger.debug("[HTTP] Health check request detected at root path, returning 200 OK")
             return _build_response(http.HTTPStatus.OK, 'OK\n')
+
+    _flush_buffer()
 
     if not request_path.startswith(GENESYS_PATH):
         logger.error("[HTTP] Path mismatch:")
