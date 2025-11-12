@@ -233,6 +233,8 @@ class GeminiRealtimeClient:
         self._consecutive_silence_frames = 0
         self._silence_frame_threshold = max(1, int(round(1.0 / frame_duration)))
         self._pcm16_silence_floor = PCM16_SILENCE_AMPLITUDE_FLOOR
+        self._manual_activity_detection = True
+        self._activity_in_progress = False
 
         # Gemini client and session context
         self.client = None
@@ -582,10 +584,13 @@ class GeminiRealtimeClient:
             return
 
         try:
-            await self.session.send_realtime_input(audio_stream_end=True)
-            self.logger.debug("[Gemini] Sent audio_stream_end to flush paused audio stream")
+            if self._manual_activity_detection:
+                await self._send_activity_end()
+            else:
+                await self.session.send_realtime_input(audio_stream_end=True)
+                self.logger.debug("[Gemini] Sent audio_stream_end to flush paused audio stream")
         except Exception as exc:
-            self.logger.error(f"Error sending audio_stream_end marker: {exc}", exc_info=True)
+            self.logger.error("Error signaling end of audio segment: %s", exc, exc_info=True)
         finally:
             self._audio_stream_open = False
             self._consecutive_silence_frames = 0
@@ -608,6 +613,8 @@ class GeminiRealtimeClient:
             else:
                 self._consecutive_silence_frames = 0
                 if not self._audio_stream_open:
+                    if self._manual_activity_detection:
+                        await self._ensure_activity_started()
                     self._audio_stream_open = True
 
             # Resample PCM16 8kHz (Genesys) to PCM16 16kHz (Gemini)
@@ -626,6 +633,31 @@ class GeminiRealtimeClient:
 
         except Exception as e:
             self.logger.error(f"Error sending audio to Gemini: {e}")
+
+    async def _ensure_activity_started(self):
+        if not self._manual_activity_detection:
+            return
+        if self._activity_in_progress or not self.session or not self.running:
+            return
+        try:
+            await self.session.send_realtime_input(activity_start=types.ActivityStart())
+            self._activity_in_progress = True
+            self.logger.debug("[Gemini] Sent activity_start (manual VAD)")
+        except Exception as exc:
+            self.logger.error(f"Error sending activity_start: {exc}", exc_info=True)
+
+    async def _send_activity_end(self):
+        if not self._manual_activity_detection:
+            return
+        if not self._activity_in_progress or not self.session:
+            return
+        try:
+            await self.session.send_realtime_input(activity_end=types.ActivityEnd())
+            self.logger.debug("[Gemini] Sent activity_end (manual VAD)")
+        except Exception as exc:
+            self.logger.error(f"Error sending activity_end: {exc}", exc_info=True)
+        finally:
+            self._activity_in_progress = False
 
     async def start_receiving(self, on_audio_callback):
         """Start receiving responses from Gemini."""
@@ -691,6 +723,19 @@ class GeminiRealtimeClient:
                                 if self._diagnostics_enabled_flag():
                                     diag_summary = {k: v for k, v in server_summary.items() if k != "grounding_metadata"}
                                     self._diagnostic_log("server_content", diag_summary)
+
+                            input_transcription = getattr(server_content, "input_transcription", None)
+                            if input_transcription and getattr(input_transcription, "text", None):
+                                self.logger.info(
+                                    f"[Gemini] Input transcription: '{input_transcription.text}' "
+                                    f"(final={getattr(input_transcription, 'finished', False)})"
+                                )
+                            output_transcription = getattr(server_content, "output_transcription", None)
+                            if output_transcription and getattr(output_transcription, "text", None):
+                                self.logger.debug(
+                                    f"[Gemini] Output transcription: '{output_transcription.text}' "
+                                    f"(final={getattr(output_transcription, 'finished', False)})"
+                                )
 
                             # Track tokens
                             if usage_metadata:
@@ -1172,20 +1217,27 @@ class GeminiRealtimeClient:
             )
         )
 
-        realtime_config = types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
+        if self._manual_activity_detection:
+            automatic_detection = types.AutomaticActivityDetection(disabled=True)
+        else:
+            automatic_detection = types.AutomaticActivityDetection(
                 disabled=False,
                 start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=AUTOMATIC_VAD_PREFIX_PADDING_MS,
                 silence_duration_ms=AUTOMATIC_VAD_SILENCE_MS
             )
+
+        realtime_config = types.RealtimeInputConfig(
+            automatic_activity_detection=automatic_detection
         )
 
         config_kwargs: Dict[str, Any] = {
             "response_modalities": [types.Modality.AUDIO],
             "speech_config": speech_config,
             "temperature": self.temperature,
+            "input_audio_transcription": types.AudioTranscriptionConfig(),
+            "output_audio_transcription": types.AudioTranscriptionConfig(),
             "realtime_input_config": realtime_config
         }
         if instructions_text:
