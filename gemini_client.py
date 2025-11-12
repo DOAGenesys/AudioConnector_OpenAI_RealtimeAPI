@@ -538,9 +538,9 @@ class GeminiRealtimeClient:
 
             self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
 
-            # Send as realtime input
+            # Send as realtime input media chunk (Gemini Live expects mediaChunks for streaming audio)
             await self.session.send_realtime_input(
-                audio=types.Blob(
+                media=types.Blob(
                     data=pcm16_16k,
                     mime_type="audio/pcm;rate=16000"
                 )
