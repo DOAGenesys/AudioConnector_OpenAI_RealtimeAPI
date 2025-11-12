@@ -202,6 +202,14 @@ class GeminiRealtimeClient:
             'output_audio_tokens': 0
         }
 
+        # Audio stream management for Gemini VAD expectations
+        frame_duration = GENESYS_PCMU_FRAME_SIZE / 8000.0 if GENESYS_PCMU_FRAME_SIZE > 0 else 0.02
+        if frame_duration <= 0:
+            frame_duration = 0.02
+        self._audio_stream_open = False
+        self._consecutive_silence_frames = 0
+        self._silence_frame_threshold = max(1, int(round(1.0 / frame_duration)))
+
         # Gemini client and session context
         self.client = None
         self.model = None
@@ -525,6 +533,40 @@ class GeminiRealtimeClient:
             except Exception as e:
                 self.logger.error(f"Error in _safe_send: {e}")
 
+    def _is_silence_frame(self, pcmu_frame: bytes) -> bool:
+        """Determine if a Genesys PCMU frame contains only silence bytes."""
+        if not pcmu_frame:
+            return True
+        silence_value = GENESYS_PCMU_SILENCE_BYTE & 0xFF
+        return all(byte == silence_value for byte in pcmu_frame)
+
+    async def _flush_audio_stream_if_needed(self, force: bool = False):
+        """
+        Flush pending realtime audio input when the caller is silent or when the session ends.
+
+        Gemini Live expects an explicit `audio_stream_end` marker when the upstream stream pauses
+        for more than ~1 second (per docs). Without it, VAD may not hand control back to the model.
+        """
+        if not self.session:
+            return
+        if not self.running and not force:
+            return
+
+        should_flush = force or (
+            self._audio_stream_open and self._consecutive_silence_frames >= self._silence_frame_threshold
+        )
+        if not should_flush:
+            return
+
+        try:
+            await self.session.send_realtime_input(audio_stream_end=True)
+            self.logger.debug("[Gemini] Sent audio_stream_end to flush paused audio stream")
+        except Exception as exc:
+            self.logger.error(f"Error sending audio_stream_end marker: {exc}", exc_info=True)
+        finally:
+            self._audio_stream_open = False
+            self._consecutive_silence_frames = 0
+
     async def send_audio(self, pcmu_8k: bytes):
         """Send audio to Gemini (convert PCMU 8kHz to PCM16 16kHz)."""
         if not self.running or self.session is None:
@@ -533,14 +575,25 @@ class GeminiRealtimeClient:
             return
 
         try:
+            silence_frame = self._is_silence_frame(pcmu_8k)
+            if silence_frame:
+                self._consecutive_silence_frames += 1
+                await self._flush_audio_stream_if_needed()
+                if not self._audio_stream_open:
+                    return  # drop redundant silence once the stream is flushed
+            else:
+                self._consecutive_silence_frames = 0
+                if not self._audio_stream_open:
+                    self._audio_stream_open = True
+
             # Convert PCMU 8kHz (Genesys) to PCM16 16kHz (Gemini) using efficient audioop
             pcm16_16k = pcmu_8k_to_pcm16_16k(pcmu_8k)
 
             self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
 
-            # Send as realtime input media chunk (Gemini Live expects mediaChunks for streaming audio)
+            # Send as realtime input (Gemini Live SDK expects exactly one argument per call)
             await self.session.send_realtime_input(
-                media=types.Blob(
+                audio=types.Blob(
                     data=pcm16_16k,
                     mime_type="audio/pcm;rate=16000"
                 )
@@ -1229,6 +1282,7 @@ class GeminiRealtimeClient:
         self._buffer_and_emit_pcmu(b"", force_flush=True)
         self._pending_pcmu_bytes.clear()
         self._on_audio_callback = None
+        await self._flush_audio_stream_if_needed(force=True)
 
         # Exit the async context manager if it exists
         if self._session_context:
