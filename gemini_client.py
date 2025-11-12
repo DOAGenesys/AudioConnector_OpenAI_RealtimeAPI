@@ -29,11 +29,15 @@ from config import (
 from utils import (
     format_json,
     create_final_system_prompt,
-    pcmu_8k_to_pcm16_16k,
     pcm16_24k_to_pcmu_8k,
     resample_audio,
     decode_pcmu_to_pcm16
 )
+
+
+PCM16_SILENCE_AMPLITUDE_FLOOR = 750  # Empirically chosen to treat < ~2% full-scale as silence
+AUTOMATIC_VAD_SILENCE_MS = 900       # Aligns with Gemini docs (~1s pause flush)
+AUTOMATIC_VAD_PREFIX_PADDING_MS = 60
 
 
 TERMINATION_GUIDANCE = """[CALL CONTROL]
@@ -148,6 +152,25 @@ def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[Dict[s
     return declarations
 
 
+def _build_function_declaration_objects(function_declarations: List[Dict[str, Any]]) -> Optional[List[types.FunctionDeclaration]]:
+    if not function_declarations:
+        return None
+
+    typed_declarations: List[types.FunctionDeclaration] = []
+    for decl in function_declarations:
+        name = decl.get("name")
+        if not name:
+            continue
+        typed_declarations.append(
+            types.FunctionDeclaration(
+                name=name,
+                description=decl.get("description"),
+                parameters_json_schema=decl.get("parameters")
+            )
+        )
+    return typed_declarations or None
+
+
 class GeminiRealtimeClient:
     """
     Gemini Live API client that mirrors the OpenAIRealtimeClient interface
@@ -209,6 +232,7 @@ class GeminiRealtimeClient:
         self._audio_stream_open = False
         self._consecutive_silence_frames = 0
         self._silence_frame_threshold = max(1, int(round(1.0 / frame_duration)))
+        self._pcm16_silence_floor = PCM16_SILENCE_AMPLITUDE_FLOOR
 
         # Gemini client and session context
         self.client = None
@@ -303,6 +327,9 @@ class GeminiRealtimeClient:
                     )
                     self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
+        if isinstance(self.max_output_tokens, str) and self.max_output_tokens.lower() == "inf":
+            self.max_output_tokens = None
+
         self.final_instructions = create_final_system_prompt(
             self.admin_instructions,
             language=language,
@@ -396,21 +423,14 @@ class GeminiRealtimeClient:
 
             # Wrap function declarations in tools structure (required by Gemini Live API)
             # Format: [{"function_declarations": [...]}]
-            tools = None
-            tool_policy = None
-            logged_function_names: List[str] = []
+            gemini_function_declarations: Optional[List[Dict[str, Any]]] = None
+            logged_function_names = []
             if function_definition_dicts:
                 logged_function_names = [tool.get("name", "unknown") for tool in function_definition_dicts]
                 gemini_function_declarations = _build_function_declarations(function_definition_dicts)
-                if gemini_function_declarations:
-                    tools = [
-                        {
-                            "function_declarations": gemini_function_declarations
-                        }
-                    ]
-                tool_policy = self._build_tool_policy(has_tools=bool(gemini_function_declarations))
-            else:
-                tool_policy = None
+
+            has_tools = bool(gemini_function_declarations)
+            tool_policy = self._build_tool_policy(has_tools=has_tools)
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -418,22 +438,6 @@ class GeminiRealtimeClient:
             if self.tool_instruction_text:
                 extra_blocks.append(self.tool_instruction_text)
             instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
-
-            # Build generation config with temperature
-            speech_config_payload = {
-                "voice_config": {
-                    "prebuilt_voice_config": {
-                        "voice_name": self.voice
-                    }
-                }
-            }
-            generation_config_payload: Dict[str, Any] = {
-                "temperature": self.temperature,
-                "response_modalities": ["AUDIO"],
-                "speech_config": speech_config_payload
-            }
-            if self.max_output_tokens is not None:
-                generation_config_payload["max_output_tokens"] = self.max_output_tokens
 
             fc_mode_value = None
             if tool_policy:
@@ -443,15 +447,14 @@ class GeminiRealtimeClient:
             else:
                 self._tool_policy = None
 
-            config_payload: Dict[str, Any] = {
-                "generation_config": generation_config_payload,
-                "system_instruction": instructions_text
-            }
-            if tools:
-                config_payload["tools"] = tools
+            config_payload = self._build_live_connect_config(instructions_text, gemini_function_declarations)
 
             if self._debug_enabled():
-                tool_config_mode = fc_mode_value or ("AUTO" if tools else "DISABLED")
+                tool_config_mode = fc_mode_value or ("AUTO" if has_tools else "DISABLED")
+                try:
+                    config_preview = config_payload.model_dump(exclude_none=True)
+                except AttributeError:
+                    config_preview = config_payload
                 debug_connect_payload = {
                     "model": self.model,
                     "voice": self.voice,
@@ -460,7 +463,8 @@ class GeminiRealtimeClient:
                     "tool_names": logged_function_names,
                     "tool_choice": self.custom_tool_choice,
                     "tool_config_mode": tool_config_mode,
-                    "instructions_preview": instructions_text[:800] if instructions_text else None
+                    "instructions_preview": instructions_text[:800] if instructions_text else None,
+                    "config": config_preview
                 }
                 self._debug_log_payload("[FunctionCall] Gemini connect configuration", debug_connect_payload)
 
@@ -484,7 +488,7 @@ class GeminiRealtimeClient:
             )
             self.running = True
 
-            if tools:
+            if has_tools and gemini_function_declarations:
                 mode_label = fc_mode_value or "AUTO"
                 self.logger.info(
                     f"[FunctionCall] Configured {len(logged_function_names)} Gemini function declarations: {logged_function_names}; function_calling_mode={mode_label}"
@@ -533,12 +537,31 @@ class GeminiRealtimeClient:
             except Exception as e:
                 self.logger.error(f"Error in _safe_send: {e}")
 
-    def _is_silence_frame(self, pcmu_frame: bytes) -> bool:
+    def _is_silence_frame(self, pcmu_frame: bytes, pcm16_8k: Optional[bytes] = None) -> bool:
         """Determine if a Genesys PCMU frame contains only silence bytes."""
         if not pcmu_frame:
             return True
         silence_value = GENESYS_PCMU_SILENCE_BYTE & 0xFF
-        return all(byte == silence_value for byte in pcmu_frame)
+        if all(byte == silence_value for byte in pcmu_frame):
+            return True
+
+        if not pcm16_8k:
+            try:
+                pcm16_8k = decode_pcmu_to_pcm16(pcmu_frame)
+            except Exception:
+                pcm16_8k = None
+
+        if not pcm16_8k:
+            return False
+
+        try:
+            samples = memoryview(pcm16_8k).cast('h')
+            if not samples:
+                return True
+            max_amplitude = max(abs(sample) for sample in samples)
+            return max_amplitude < self._pcm16_silence_floor
+        except Exception:
+            return False
 
     async def _flush_audio_stream_if_needed(self, force: bool = False):
         """
@@ -575,7 +598,8 @@ class GeminiRealtimeClient:
             return
 
         try:
-            silence_frame = self._is_silence_frame(pcmu_8k)
+            pcm16_8k = decode_pcmu_to_pcm16(pcmu_8k)
+            silence_frame = self._is_silence_frame(pcmu_8k, pcm16_8k)
             if silence_frame:
                 self._consecutive_silence_frames += 1
                 await self._flush_audio_stream_if_needed()
@@ -586,8 +610,8 @@ class GeminiRealtimeClient:
                 if not self._audio_stream_open:
                     self._audio_stream_open = True
 
-            # Convert PCMU 8kHz (Genesys) to PCM16 16kHz (Gemini) using efficient audioop
-            pcm16_16k = pcmu_8k_to_pcm16_16k(pcmu_8k)
+            # Resample PCM16 8kHz (Genesys) to PCM16 16kHz (Gemini)
+            pcm16_16k = resample_audio(pcm16_8k, 8000, 16000, 2)
 
             self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
 
@@ -1136,6 +1160,44 @@ class GeminiRealtimeClient:
             except Exception:
                 pass
         return str(payload)
+
+    def _build_live_connect_config(
+        self,
+        instructions_text: Optional[str],
+        function_declarations: Optional[List[Dict[str, Any]]]
+    ) -> types.LiveConnectConfig:
+        speech_config = types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
+            )
+        )
+
+        realtime_config = types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=False,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_MEDIUM,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_MEDIUM,
+                prefix_padding_ms=AUTOMATIC_VAD_PREFIX_PADDING_MS,
+                silence_duration_ms=AUTOMATIC_VAD_SILENCE_MS
+            )
+        )
+
+        config_kwargs: Dict[str, Any] = {
+            "response_modalities": [types.Modality.AUDIO],
+            "speech_config": speech_config,
+            "temperature": self.temperature,
+            "realtime_input_config": realtime_config
+        }
+        if instructions_text:
+            config_kwargs["system_instruction"] = instructions_text
+        if self.max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = self.max_output_tokens
+
+        typed_declarations = _build_function_declaration_objects(function_declarations or [])
+        if typed_declarations:
+            config_kwargs["tools"] = [types.Tool(function_declarations=typed_declarations)]
+
+        return types.LiveConnectConfig(**config_kwargs)
 
     def _build_tool_policy(self, has_tools: bool) -> Optional[Dict[str, Any]]:
         """
