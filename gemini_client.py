@@ -432,6 +432,7 @@ class GeminiRealtimeClient:
                 mode_attr = getattr(tool_config.function_calling_config, "mode", None)
                 fc_mode_value = getattr(mode_attr, "value", mode_attr)
                 generation_config_payload["tool_config"] = tool_config.model_dump(
+                    mode="json",
                     by_alias=True,
                     exclude_none=True
                 )
