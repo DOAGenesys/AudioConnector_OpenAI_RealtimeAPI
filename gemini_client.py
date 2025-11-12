@@ -182,6 +182,7 @@ class GeminiRealtimeClient:
         self.tool_instruction_text: Optional[str] = None
         self.custom_tool_choice: Optional[Any] = None
         self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
+        self._tool_policy: Optional[Dict[str, Any]] = None
         self._response_in_progress = False
         self._has_audio_in_buffer = False
         self.escalation_prompt = None
@@ -388,8 +389,7 @@ class GeminiRealtimeClient:
             # Wrap function declarations in tools structure (required by Gemini Live API)
             # Format: [{"function_declarations": [...]}]
             tools = None
-            tool_config = None
-            tool_config_payload: Optional[Dict[str, Any]] = None
+            tool_policy = None
             logged_function_names: List[str] = []
             if function_definition_dicts:
                 logged_function_names = [tool.get("name", "unknown") for tool in function_definition_dicts]
@@ -400,9 +400,9 @@ class GeminiRealtimeClient:
                             "function_declarations": gemini_function_declarations
                         }
                     ]
-                tool_config = self._build_tool_config(has_tools=bool(gemini_function_declarations))
+                tool_policy = self._build_tool_policy(has_tools=bool(gemini_function_declarations))
             else:
-                tool_config = None
+                tool_policy = None
 
             # Build configuration
             instructions_text = self.final_instructions
@@ -428,12 +428,12 @@ class GeminiRealtimeClient:
                 generation_config_payload["max_output_tokens"] = self.max_output_tokens
 
             fc_mode_value = None
-            if tool_config and getattr(tool_config, "function_calling_config", None):
-                mode_attr = getattr(tool_config.function_calling_config, "mode", None)
+            if tool_policy:
+                mode_attr = tool_policy.get("mode")
                 fc_mode_value = getattr(mode_attr, "value", mode_attr)
-                tool_config_payload = tool_config.model_dump(
-                    exclude_none=True
-                )
+                self._tool_policy = tool_policy
+            else:
+                self._tool_policy = None
 
             config_payload: Dict[str, Any] = {
                 "generation_config": generation_config_payload,
@@ -441,8 +441,6 @@ class GeminiRealtimeClient:
             }
             if tools:
                 config_payload["tools"] = tools
-            if tool_config_payload:
-                config_payload["tool_config"] = tool_config_payload
 
             if self._debug_enabled():
                 tool_config_mode = fc_mode_value or ("AUTO" if tools else "DISABLED")
@@ -870,6 +868,27 @@ class GeminiRealtimeClient:
                 self.logger.error(f"[FunctionCall] ERROR: Function name is empty for call_id={call_id}")
                 return
 
+            if not self._is_tool_call_permitted(name):
+                self.logger.warning(
+                    f"[FunctionCall] Tool call blocked by policy (mode={self._tool_policy.get('mode') if self._tool_policy else 'AUTO'}): {name}"
+                )
+                rejection_payload = {
+                    "result": "error",
+                    "error": "Tool invocation disabled by configuration",
+                    "tool": name
+                }
+                try:
+                    await self.session.send_tool_response(function_responses=[
+                        types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response=rejection_payload
+                        )
+                    ])
+                except Exception as rejection_err:
+                    self.logger.error(f"[FunctionCall] Failed to send rejection for {name}: {rejection_err}", exc_info=True)
+                return
+
             # Check if this is a Genesys tool
             if name in self.genesys_tool_handlers:
                 await self._handle_genesys_tool_call(name, call_id, args or {})
@@ -1065,15 +1084,15 @@ class GeminiRealtimeClient:
                 pass
         return str(payload)
 
-    def _build_tool_config(self, has_tools: bool) -> Optional[types.ToolConfig]:
+    def _build_tool_policy(self, has_tools: bool) -> Optional[Dict[str, Any]]:
         """
-        Translate OpenAI-style tool_choice semantics into Gemini's function calling config.
+        Translate OpenAI-style tool_choice semantics into a local enforcement policy.
         """
         if not has_tools:
             return None
 
         mode = types.FunctionCallingConfigMode.AUTO
-        allowed_function_names = None
+        allowed_function_names: Optional[List[str]] = None
 
         choice = self.custom_tool_choice
         if isinstance(choice, str):
@@ -1091,12 +1110,28 @@ class GeminiRealtimeClient:
                     allowed_function_names = [func_name]
                     mode = types.FunctionCallingConfigMode.VALIDATED
 
-        return types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(
-                mode=mode,
-                allowed_function_names=allowed_function_names
-            )
-        )
+        return {
+            "mode": mode,
+            "allowed_function_names": allowed_function_names
+        }
+
+    def _is_tool_call_permitted(self, function_name: str) -> bool:
+        """
+        Enforce local tool invocation policy derived from tool_choice.
+        """
+        if not self._tool_policy:
+            return True
+
+        mode = self._tool_policy.get("mode")
+        allowed = self._tool_policy.get("allowed_function_names") or []
+
+        if mode == types.FunctionCallingConfigMode.NONE:
+            return False
+
+        if mode == types.FunctionCallingConfigMode.VALIDATED and allowed:
+            return function_name in allowed
+
+        return True
 
     async def _handle_genesys_tool_call(self, name: str, call_id: str, args: Dict[str, Any]):
         """Handle Genesys data action tool calls."""
