@@ -1175,8 +1175,8 @@ class GeminiRealtimeClient:
         realtime_config = types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 disabled=False,
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_MEDIUM,
-                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_MEDIUM,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=AUTOMATIC_VAD_PREFIX_PADDING_MS,
                 silence_duration_ms=AUTOMATIC_VAD_SILENCE_MS
             )
