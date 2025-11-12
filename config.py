@@ -203,6 +203,23 @@ LOG_FILE = "logging.txt"
 GEMINI_DIAGNOSTICS_SUMMARY = _str_to_bool(os.getenv('GEMINI_DIAGNOSTICS_SUMMARY', 'false'))
 LOGGING_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
 
+
+class _HealthCheckNoiseFilter(logging.Filter):
+    """
+    Filter out benign websockets log entries emitted for HTTP health checks.
+
+    The websockets server logs an INFO message ("connection rejected (200 OK)")
+    whenever a non-WebSocket health probe hits the root path. Those probes are
+    expected and do not indicate any problem, so suppressing them keeps the log
+    stream focused on actionable events.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage() if record else ""
+        if "connection rejected (200 OK)" in message:
+            return False
+        return True
+
 if os.path.exists(LOG_FILE):
     os.remove(LOG_FILE)
 
@@ -237,3 +254,7 @@ if DEBUG != 'true':
 else:
     # In DEBUG mode, keep websockets at INFO to avoid excessive logs
     logging.getLogger('websockets').setLevel(logging.INFO)
+
+# Drop noisy websockets.server log entries for routine HTTP health checks
+websockets_server_logger = logging.getLogger('websockets.server')
+websockets_server_logger.addFilter(_HealthCheckNoiseFilter())
