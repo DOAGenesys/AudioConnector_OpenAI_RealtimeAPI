@@ -437,6 +437,9 @@ class GeminiRealtimeClient:
 
         Following official docs pattern:
         https://ai.google.dev/gemini-api/docs/live
+
+        CRITICAL: Includes Google Search grounding workaround for function calling.
+        Per GitHub issue reports, adding google_search tool enables function calling to work properly.
         """
         # Speech configuration (voice)
         speech_config = types.SpeechConfig(
@@ -474,7 +477,7 @@ class GeminiRealtimeClient:
             config_dict["max_output_tokens"] = self.max_output_tokens
 
         # Add tools if we have function declarations
-        # Following Gemini docs: tools = [{"function_declarations": [...]}]
+        # Following Gemini docs: tools = [{"function_declarations": [...]}, {"google_search": {}}]
         if function_declarations:
             # Convert dict declarations to typed FunctionDeclaration objects
             typed_declarations = []
@@ -486,11 +489,18 @@ class GeminiRealtimeClient:
                 )
                 typed_declarations.append(typed_decl)
 
-            # Wrap in Tool object
-            config_dict["tools"] = [types.Tool(function_declarations=typed_declarations)]
+            # CRITICAL FIX: Add Google Search grounding alongside function declarations
+            # Per GitHub issue: "Tool calling works for me too, when set with grounding..."
+            # This enables the model to properly recognize and execute function calls
+            tools_list = [
+                types.Tool(function_declarations=typed_declarations),
+                types.Tool(google_search=types.GoogleSearch())  # Grounding workaround
+            ]
+
+            config_dict["tools"] = tools_list
 
             self.logger.info(
-                f"[FunctionCall] Configured {len(typed_declarations)} function declarations for Gemini"
+                f"[FunctionCall] Configured {len(typed_declarations)} function declarations with Google Search grounding"
             )
 
         return types.LiveConnectConfig(**config_dict)
@@ -595,7 +605,7 @@ class GeminiRealtimeClient:
         Handles:
         - Audio data (PCM16 24kHz -> PCMU 8kHz)
         - Server content (turn completion, tool calls)
-        - Function calls
+        - Function calls (via tool_call path - this is the primary path per GitHub reports)
         - Token usage tracking
         - Transcription accumulation for function calling
         """
@@ -621,13 +631,16 @@ class GeminiRealtimeClient:
                         if message.data is not None:
                             self._process_audio_output(message.data)
 
-                        # Process server content (tool calls, turn completion, etc.)
+                        # CRITICAL: Process tool calls FIRST (this is the primary path per GitHub)
+                        # Per GitHub comment: "message.ToolCall.FunctionCalls always works"
+                        if message.tool_call:
+                            self.logger.debug("[FunctionCall] Detected tool_call message path")
+                            await self._process_tool_call(message.tool_call)
+
+                        # Process server content (turn completion, etc.)
+                        # This also checks for function calls in model_turn as a fallback
                         if message.server_content:
                             await self._process_server_content(message.server_content)
-
-                        # Process tool calls (alternative path)
-                        if message.tool_call:
-                            await self._process_tool_call(message.tool_call)
 
                         # Track token usage
                         if message.usage_metadata:
@@ -741,7 +754,7 @@ class GeminiRealtimeClient:
 
         Handles:
         - Turn completion
-        - Model turns (containing function calls)
+        - Model turns (containing function calls via model_turn.parts - fallback path)
         - Interruptions
         - Transcriptions
 
@@ -756,16 +769,12 @@ class GeminiRealtimeClient:
             if hasattr(server_content, 'input_transcription'):
                 transcript = server_content.input_transcription
                 if transcript and hasattr(transcript, 'text') and transcript.text:
-                    text = transcript.text.strip()
-                    if text:
-                        self.logger.info(f"[Gemini] Input transcription: '{text}'")
-                        self._accumulated_transcription += " " + text
-                        self._transcription_pending = True
+                    self.logger.info(f"[Gemini] Input transcription: '{transcript.text}'")
 
             if hasattr(server_content, 'output_transcription'):
                 transcript = server_content.output_transcription
                 if transcript and hasattr(transcript, 'text') and transcript.text:
-                    self.logger.debug(f"[Gemini] Output: '{transcript.text}'")
+                    self.logger.debug(f"[Gemini] Output transcription: '{transcript.text}'")
 
             # Handle turn complete
             if server_content.turn_complete:
@@ -785,15 +794,20 @@ class GeminiRealtimeClient:
                 if self._await_disconnect_on_done and self._disconnect_context:
                     await self._handle_disconnect_callback()
 
-            # Handle model turn (contains function calls)
+            # Handle model turn (contains function calls via parts - this is a fallback path)
+            # Per GitHub: The primary path is message.tool_call, but we check here as fallback
             if hasattr(server_content, 'model_turn') and server_content.model_turn:
                 self._response_in_progress = True
                 model_turn = server_content.model_turn
 
                 if hasattr(model_turn, 'parts') and model_turn.parts:
+                    has_function_calls = False
                     for part in model_turn.parts:
                         # Check for function call in part
                         if hasattr(part, 'function_call') and part.function_call:
+                            if not has_function_calls:
+                                self.logger.info("[FunctionCall] Detected function call in model_turn.parts (fallback path)")
+                                has_function_calls = True
                             await self._handle_function_call_from_part(part.function_call)
 
             # Handle interruptions
@@ -812,19 +826,30 @@ class GeminiRealtimeClient:
             self.logger.error(f"Error processing server content: {e}", exc_info=True)
 
     async def _process_tool_call(self, tool_call):
-        """Process tool call message (alternative path for function calls)."""
+        """
+        Process tool call message (PRIMARY path for function calls per GitHub reports).
+
+        Per GitHub comment: "message.ToolCall.FunctionCalls always works and contains what we actually expect"
+        """
         try:
             if not hasattr(tool_call, 'function_calls'):
+                self.logger.warning("[FunctionCall] tool_call message has no function_calls attribute")
                 return
 
             function_calls = tool_call.function_calls or []
-            self.logger.info(f"[FunctionCall] Received {len(function_calls)} tool call(s)")
+            if not function_calls:
+                self.logger.warning("[FunctionCall] tool_call.function_calls is empty")
+                return
 
-            for func_call in function_calls:
+            self.logger.info(f"[FunctionCall] ✓ Received {len(function_calls)} function call(s) via tool_call path")
+
+            for idx, func_call in enumerate(function_calls):
+                func_name = getattr(func_call, 'name', 'unknown')
+                self.logger.info(f"[FunctionCall] Processing call {idx+1}/{len(function_calls)}: {func_name}")
                 await self._handle_function_call_from_part(func_call)
 
         except Exception as e:
-            self.logger.error(f"Error processing tool call: {e}", exc_info=True)
+            self.logger.error(f"[FunctionCall] Error processing tool call: {e}", exc_info=True)
 
     async def _handle_function_call_from_part(self, function_call):
         """
