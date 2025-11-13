@@ -1,10 +1,22 @@
+"""
+Gemini Live API Client - Refactored from scratch for production use.
+
+This client implements the Gemini Live API following official documentation:
+https://ai.google.dev/gemini-api/docs/live
+https://ai.google.dev/gemini-api/docs/live-tools
+
+Key features:
+- Native audio support (24kHz output, 16kHz input)
+- Function calling with Genesys data actions
+- Call control functions (end conversation, escalation)
+- Voice Activity Detection (VAD)
+- Token tracking and session management
+"""
 
 import asyncio
 import json
 import time
 import base64
-import io
-import copy
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
@@ -24,7 +36,6 @@ from config import (
     GENESYS_RATE_WINDOW,
     GENESYS_PCMU_FRAME_SIZE,
     GENESYS_PCMU_SILENCE_BYTE,
-    GEMINI_DIAGNOSTICS_SUMMARY
 )
 from utils import (
     format_json,
@@ -35,262 +46,112 @@ from utils import (
 )
 
 
-PCM16_SILENCE_AMPLITUDE_FLOOR = 750  # Empirically chosen to treat < ~2% full-scale as silence
-AUTOMATIC_VAD_SILENCE_MS = 900       # Aligns with Gemini docs (~1s pause flush)
-AUTOMATIC_VAD_PREFIX_PADDING_MS = 60
-MANUAL_VAD_IDLE_TIMEOUT_SECONDS = 1.0
-IDLE_WATCH_INTERVAL_SECONDS = 0.2
+# VAD and silence detection constants
+PCM16_SILENCE_FLOOR = 750
+VAD_SILENCE_THRESHOLD_FRAMES = 50  # ~1 second at 20ms frames
+VAD_IDLE_CHECK_INTERVAL = 0.2
 
+# Call control guidance integrated into system prompt
+CALL_CONTROL_GUIDANCE = """
+## Call Control Instructions
 
-TERMINATION_GUIDANCE = """[CALL CONTROL]
-Call `end_conversation_successfully` ONLY when BOTH of these conditions are met:
-1. The caller's request has been completely addressed and resolved
-2. The caller has explicitly confirmed they don't need any additional help or have no further questions
+You have two special functions to end the conversation:
 
-Call `end_conversation_with_escalation` when the caller explicitly requests a human, the task is blocked, or additional assistance is needed. Use the `reason` field to describe why escalation is required.
+1. **end_conversation_successfully** - Use this ONLY when:
+   - The customer's request has been COMPLETELY fulfilled
+   - AND the customer explicitly confirms they don't need anything else
+   - Provide a brief summary of what was accomplished
 
-Before invoking any call-control function, you MUST ensure all required output session variables are properly filled with accurate information. After the function is called, deliver the appropriate farewell message as instructed."""
+2. **end_conversation_with_escalation** - Use this when:
+   - The customer explicitly requests to speak with a human
+   - You cannot complete their request due to system limitations
+   - The situation requires human intervention
+   - Provide a clear reason for the escalation
 
-
-def _clean_schema_for_gemini(schema: Any) -> Any:
-    """
-    Recursively remove OpenAI-specific fields from a schema.
-
-    Removes:
-    - strict: OpenAI-specific structured output parameter
-    - additionalProperties: While JSON Schema standard, Gemini doesn't accept it
-    """
-    if not isinstance(schema, dict):
-        return schema
-
-    # Create a deep copy to avoid modifying the original
-    cleaned = copy.deepcopy(schema)
-
-    # Remove OpenAI-specific fields at this level
-    cleaned.pop("strict", None)
-    cleaned.pop("additionalProperties", None)
-
-    # Recursively clean nested objects
-    if "properties" in cleaned and isinstance(cleaned["properties"], dict):
-        for key, value in cleaned["properties"].items():
-            if isinstance(value, dict):
-                cleaned["properties"][key] = _clean_schema_for_gemini(value)
-
-    if "items" in cleaned and isinstance(cleaned["items"], dict):
-        cleaned["items"] = _clean_schema_for_gemini(cleaned["items"])
-
-    if "definitions" in cleaned and isinstance(cleaned["definitions"], dict):
-        for key, value in cleaned["definitions"].items():
-            if isinstance(value, dict):
-                cleaned["definitions"][key] = _clean_schema_for_gemini(value)
-
-    return cleaned
-
-
-def _default_call_control_tools() -> List[Dict[str, Any]]:
-    """Returns default call control function declarations for Gemini."""
-    return [
-        {
-            "name": "end_conversation_successfully",
-            "description": (
-                "Gracefully end the phone call ONLY when the caller has BOTH: (1) had their request completely addressed, "
-                "AND (2) explicitly confirmed they don't need any additional help or have no further questions. "
-                "Provide a short summary of the completed task in the `summary` field. "
-                "Do NOT call this function if the customer has not explicitly confirmed they are done."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "One-sentence summary of what was accomplished before ending the call."
-                    }
-                },
-                "required": ["summary"]
-            }
-        },
-        {
-            "name": "end_conversation_with_escalation",
-            "description": (
-                "End the phone call and request a warm transfer to a human agent when the caller asks for a person, is dissatisfied, or the task cannot be completed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Why escalation is needed (e.g., customer requested human, policy restriction, unable to authenticate)."
-                    }
-                },
-                "required": ["reason"]
-            }
-        }
-    ]
-
-
-def _build_function_declarations(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Convert OpenAI-style tool definitions into Gemini function declaration payloads.
-
-    Gemini expects snake_case JSON schema fields (matching OpenAPI) while the SDK's
-    typed helpers convert enum values to uppercase. Instead of relying on the SDK
-    models (which would upcase the schema `type` fields and break validation), build
-    lightweight dicts that mirror the REST format documented in
-    https://ai.google.dev/gemini-api/docs/function-calling.
-    """
-    declarations: List[Dict[str, Any]] = []
-    for tool in tool_defs:
-        if not tool or "name" not in tool:
-            continue
-        cleaned_parameters = None
-        parameters = tool.get("parameters")
-        if isinstance(parameters, dict):
-            cleaned_parameters = _clean_schema_for_gemini(parameters)
-        declarations.append({
-            "name": tool["name"],
-            "description": tool.get("description", ""),
-            "parameters": cleaned_parameters if cleaned_parameters else None
-        })
-    return declarations
-
-
-def _build_function_declaration_objects(function_declarations: List[Dict[str, Any]]) -> Optional[List[types.FunctionDeclaration]]:
-    if not function_declarations:
-        return None
-
-    typed_declarations: List[types.FunctionDeclaration] = []
-    for decl in function_declarations:
-        name = decl.get("name")
-        if not name:
-            continue
-        typed_declarations.append(
-            types.FunctionDeclaration(
-                name=name,
-                description=decl.get("description"),
-                parameters_json_schema=decl.get("parameters")
-            )
-        )
-    return typed_declarations or None
+IMPORTANT: Do NOT end the conversation prematurely. Always confirm the customer is satisfied before calling end_conversation_successfully.
+"""
 
 
 class GeminiRealtimeClient:
     """
-    Gemini Live API client that mirrors the OpenAIRealtimeClient interface
-    for seamless integration with the AudioHook server.
+    Gemini Live API client compatible with AudioHook server interface.
+
+    Implements bidirectional audio streaming, function calling, and VAD
+    following Gemini Live API best practices.
     """
 
     def __init__(self, session_id: str, api_key: str, on_speech_started_callback=None):
+        """Initialize Gemini client with session context."""
         self.session_id = session_id
         self.api_key = api_key
         self.session = None
+        self._session_context_manager = None
         self.running = False
         self.read_task = None
         self._lock = asyncio.Lock()
         self.logger = logger.getChild(f"GeminiClient_{session_id}")
         self.start_time = time.time()
-        self.voice = None
-        self.agent_name = None
-        self.company_name = None
+
+        # Configuration
+        self.voice = "Kore"  # Default Gemini voice
+        self.model = "gemini-2.5-flash-native-audio-preview-09-2025"
+        self.temperature = DEFAULT_TEMPERATURE
+        self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
         self.admin_instructions = None
         self.final_instructions = None
+        self.agent_name = None
+        self.company_name = None
+
+        # Callbacks
         self.on_speech_started_callback = on_speech_started_callback
-        self.retry_count = 0
-        self.last_retry_time = 0
-        self.rate_limit_delays = {}
-        self.last_response = None
-        self._summary_future = None
         self.on_end_call_request = None
         self.on_handoff_request = None
-        self._await_disconnect_on_done = False
-        self._disconnect_context = None
-        self.custom_tool_definitions: List[Dict[str, Any]] = []
-        self.tool_instruction_text: Optional[str] = None
-        self.custom_tool_choice: Optional[Any] = None
-        self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
-        self._tool_policy: Optional[Dict[str, Any]] = None
-        self._response_in_progress = False
-        self._has_audio_in_buffer = False
         self.escalation_prompt = None
         self.success_prompt = None
-        self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
-        self._diagnostics_enabled = GEMINI_DIAGNOSTICS_SUMMARY
 
-        # Token tracking for Gemini
-        self._total_prompt_tokens = 0
-        self._total_candidates_tokens = 0
-        self._token_details = {
-            'input_text_tokens': 0,
-            'input_audio_tokens': 0,
-            'input_cached_text_tokens': 0,
-            'input_cached_audio_tokens': 0,
-            'output_text_tokens': 0,
-            'output_audio_tokens': 0
-        }
+        # Tool/function calling
+        self.custom_tool_definitions: List[Dict[str, Any]] = []
+        self.tool_instruction_text: Optional[str] = None
+        self.genesys_tool_handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]] = {}
 
-        # Audio stream management for Gemini VAD expectations
-        frame_duration = GENESYS_PCMU_FRAME_SIZE / 8000.0 if GENESYS_PCMU_FRAME_SIZE > 0 else 0.02
-        if frame_duration <= 0:
-            frame_duration = 0.02
+        # State tracking
+        self._response_in_progress = False
+        self._has_audio_in_buffer = False
+        self._await_disconnect_on_done = False
+        self._disconnect_context = None
+        self._summary_future = None
+
+        # Audio streaming (Genesys PCMU 8kHz -> Gemini PCM16 16kHz)
         self._audio_stream_open = False
         self._consecutive_silence_frames = 0
-        self._silence_frame_threshold = max(1, int(round(1.0 / frame_duration)))
-        self._pcm16_silence_floor = PCM16_SILENCE_AMPLITUDE_FLOOR
-        self._manual_activity_detection = True
-        self._activity_in_progress = False
-        self._last_audio_frame_time = 0.0
-        self._silence_monitor_task: Optional[asyncio.Task] = None
-        self._pending_transcript: List[str] = []
+        self._last_audio_time = 0.0
+        self._vad_monitor_task = None
 
-        # Gemini client and session context
-        self.client = None
-        self.model = None
-        self._session_context = None
-
-        # Downlink audio buffering (Gemini PCM16 -> Genesys PCMU)
+        # Audio output buffering (Gemini PCM16 24kHz -> Genesys PCMU 8kHz)
         self._on_audio_callback = None
         self._pending_pcmu_bytes = bytearray()
         self._pcmu_frame_size = GENESYS_PCMU_FRAME_SIZE
 
-    async def terminate_session(self, reason="completed", final_message=None):
-        """Terminate the Gemini session."""
-        try:
-            if final_message and self.session:
-                # Send a final message before closing
-                await self.session.send_client_content(
-                    turns=types.Content(
-                        role="model",
-                        parts=[types.Part(text=final_message)]
-                    ),
-                    turn_complete=True
-                )
+        # Token tracking (Gemini format)
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._token_details = {
+            'input_text': 0,
+            'input_audio': 0,
+            'input_cached': 0,
+            'output_text': 0,
+            'output_audio': 0,
+        }
 
-            await self.close()
-        except Exception as e:
-            self.logger.error(f"Error terminating session: {e}")
-            raise
+        # Retry/rate limiting
+        self.retry_count = 0
+        self.last_retry_time = 0
 
-    async def handle_rate_limit(self):
-        """Handle rate limiting with exponential backoff."""
-        if self.retry_count >= 3:  # Max retries
-            self.logger.error(f"[Rate Limit] Max retry attempts (3) reached.")
-            return False
+        # Customer context for personalization
+        self.language = None
+        self.customer_data = None
 
-        self.retry_count += 1
-        session_duration = time.time() - self.start_time
-        self.logger.info(f"[Rate Limit] Current session duration: {session_duration:.2f}s")
-
-        delay = GENESYS_RATE_WINDOW
-        self.logger.warning(
-            f"[Rate Limit] Hit rate limit, attempt {self.retry_count}/3. "
-            f"Backing off for {delay}s."
-        )
-
-        self.running = False
-        await asyncio.sleep(delay)
-        self.running = True
-
-        self.last_retry_time = time.time()
-        return True
+        self.logger.info(f"Gemini client initialized for session {session_id}")
 
     async def connect(
         self,
@@ -303,51 +164,49 @@ class GeminiRealtimeClient:
         company_name=None,
         tool_definitions: Optional[List[Dict[str, Any]]] = None,
         tool_instructions: Optional[str] = None,
-        tool_choice: Optional[Any] = None
+        tool_choice: Optional[Any] = None  # Not used by Gemini, kept for interface compatibility
     ):
-        """Connect to Gemini Live API."""
-        self.admin_instructions = instructions
-        customer_data = getattr(self, 'customer_data', None)
-        language = getattr(self, 'language', None)
+        """
+        Connect to Gemini Live API and configure the session.
 
+        Args:
+            instructions: System instructions for the AI
+            voice: Voice name (will be mapped to Gemini voice)
+            temperature: Sampling temperature (0.0-2.0 for Gemini)
+            model: Model name (defaults to Gemini 2.5 Flash Native Audio)
+            max_output_tokens: Maximum output tokens
+            agent_name: Name of the AI agent
+            company_name: Company name for personalization
+            tool_definitions: List of function definitions (OpenAI format)
+            tool_instructions: Additional instructions about tools
+            tool_choice: Tool choice policy (for interface compatibility)
+        """
+        self.logger.info("[Gemini] Starting connection...")
+
+        # Store configuration
+        self.admin_instructions = instructions
         self.agent_name = agent_name
         self.company_name = company_name
         self.custom_tool_definitions = tool_definitions or []
         self.tool_instruction_text = tool_instructions
-        self.custom_tool_choice = tool_choice
-        if max_output_tokens is None:
-            self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
-        else:
-            max_tokens_value = str(max_output_tokens).strip().lower()
-            if max_tokens_value == "inf":
-                self.max_output_tokens = None
-            else:
-                try:
-                    parsed_tokens = int(max_output_tokens)
-                    if parsed_tokens <= 0:
-                        raise ValueError("max_output_tokens must be positive")
-                    self.max_output_tokens = parsed_tokens
-                except (TypeError, ValueError):
-                    self.logger.warning(
-                        f"Invalid max_output_tokens value '{max_output_tokens}'. "
-                        f"Falling back to default ({DEFAULT_MAX_OUTPUT_TOKENS})."
-                    )
-                    self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
 
-        if isinstance(self.max_output_tokens, str) and self.max_output_tokens.lower() == "inf":
-            self.max_output_tokens = None
-
+        # Build final system prompt
         self.final_instructions = create_final_system_prompt(
             self.admin_instructions,
-            language=language,
-            customer_data=customer_data,
+            language=self.language,
+            customer_data=self.customer_data,
             agent_name=self.agent_name,
             company_name=self.company_name
         )
 
-        # Map voice names from OpenAI to Gemini
-        # Gemini voices: Puck, Charon, Kore, Fenrir, Aoede
-        voice_mapping = {
+        # Add call control guidance and tool instructions
+        instruction_blocks = [self.final_instructions, CALL_CONTROL_GUIDANCE]
+        if self.tool_instruction_text:
+            instruction_blocks.append(self.tool_instruction_text)
+        system_instruction = "\n\n".join(instruction_blocks)
+
+        # Map voice names (OpenAI -> Gemini)
+        voice_map = {
             "alloy": "Puck",
             "ash": "Charon",
             "ballad": "Aoede",
@@ -358,341 +217,375 @@ class GeminiRealtimeClient:
             "verse": "Charon"
         }
 
-        # Validate and map voice
-        if voice and voice.strip():
-            # Check if it's already a Gemini voice
-            gemini_voices = ["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
+        gemini_voices = ["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
+        if voice:
             if voice in gemini_voices:
                 self.voice = voice
             else:
-                # Map from OpenAI voice names
-                self.voice = voice_mapping.get(voice, "Kore")
-        else:
-            self.voice = "Kore"
+                self.voice = voice_map.get(voice, "Kore")
 
-        try:
-            self.temperature = float(temperature) if temperature else DEFAULT_TEMPERATURE
-            # Gemini supports 0.0 to 2.0
-            if not (0.0 <= self.temperature <= 2.0):
-                logger.warning(f"Temperature {self.temperature} out of range [0.0, 2.0]. Using default: {DEFAULT_TEMPERATURE}")
+        # Validate temperature (Gemini supports 0.0-2.0)
+        if temperature is not None:
+            try:
+                temp = float(temperature)
+                self.temperature = max(0.0, min(2.0, temp))
+                if temp != self.temperature:
+                    self.logger.warning(f"Temperature {temp} clamped to {self.temperature}")
+            except (TypeError, ValueError):
+                self.logger.warning(f"Invalid temperature {temperature}, using {DEFAULT_TEMPERATURE}")
                 self.temperature = DEFAULT_TEMPERATURE
-        except (TypeError, ValueError):
-            logger.warning(f"Invalid temperature value: {temperature}. Using default: {DEFAULT_TEMPERATURE}")
-            self.temperature = DEFAULT_TEMPERATURE
 
-        # Use Gemini 2.5 Flash Native Audio model
-        # Validate that the model is a Gemini model, not an OpenAI model
-        default_gemini_model = "gemini-2.5-flash-native-audio-preview-09-2025"
-        if model:
-            # Check if the provided model is an OpenAI model (starts with "gpt-")
-            if model.startswith("gpt-"):
-                self.logger.warning(f"OpenAI model '{model}' specified but using Gemini. Using default Gemini model: {default_gemini_model}")
-                self.model = default_gemini_model
-            else:
-                self.model = model
+        # Validate model (ensure it's a Gemini model)
+        if model and not model.startswith("gpt-"):  # Not an OpenAI model
+            self.model = model
         else:
-            self.model = default_gemini_model
+            if model and model.startswith("gpt-"):
+                self.logger.warning(f"OpenAI model {model} specified, using Gemini default")
+            self.model = "gemini-2.5-flash-native-audio-preview-09-2025"
 
-        logged_function_names: List[str] = []
+        # Validate max_output_tokens
+        if max_output_tokens:
+            if str(max_output_tokens).lower() == "inf":
+                self.max_output_tokens = None
+            else:
+                try:
+                    tokens = int(max_output_tokens)
+                    self.max_output_tokens = tokens if tokens > 0 else None
+                except (TypeError, ValueError):
+                    self.logger.warning(f"Invalid max_output_tokens {max_output_tokens}, using default")
+                    self.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+
+        # Build function declarations for Gemini
+        # Following Gemini docs: tools = [{"function_declarations": [...]}]
+        function_declarations = self._build_function_declarations()
+
+        # Log configuration
+        func_names = [f["name"] for f in function_declarations] if function_declarations else []
+        self.logger.info(
+            f"[FunctionCall] Connecting with {len(func_names)} functions: {func_names}"
+        )
+        self.logger.info(f"[FunctionCall] Model: {self.model}, Voice: {self.voice}, Temp: {self.temperature}")
 
         try:
-            self.logger.info(f"Connecting to Gemini Live API using model: {self.model}...")
-            connect_start = time.time()
-
-            # Initialize Gemini client with v1alpha API version
+            # Initialize Gemini client with v1alpha for latest features
             self.client = genai.Client(
                 api_key=self.api_key,
                 http_options={'api_version': 'v1alpha'}
             )
 
-            # Build function declarations for Gemini
-            function_definition_dicts: List[Dict[str, Any]] = []
+            # Build configuration following official docs pattern
+            config = self._build_config(system_instruction, function_declarations)
 
-            # Add call control tools
-            call_control_tools = _default_call_control_tools()
-            function_definition_dicts.extend(call_control_tools)
-
-            # Add custom tool definitions (Genesys data actions, etc.)
-            if self.custom_tool_definitions:
-                # Convert OpenAI tool format to Gemini format
-                for tool in self.custom_tool_definitions:
-                    if tool.get("type") == "function":
-                        # Clean parameters to remove OpenAI-specific fields
-                        parameters = tool.get("parameters", {})
-                        cleaned_parameters = _clean_schema_for_gemini(parameters)
-
-                        func_def = {
-                            "name": tool["name"],
-                            "description": tool.get("description", ""),
-                            "parameters": cleaned_parameters
-                        }
-                        function_definition_dicts.append(func_def)
-
-            # Wrap function declarations in tools structure (required by Gemini Live API)
-            # Format: [{"function_declarations": [...]}]
-            gemini_function_declarations: Optional[List[Dict[str, Any]]] = None
-            logged_function_names = []
-            if function_definition_dicts:
-                logged_function_names = [tool.get("name", "unknown") for tool in function_definition_dicts]
-                gemini_function_declarations = _build_function_declarations(function_definition_dicts)
-
-            has_tools = bool(gemini_function_declarations)
-            tool_policy = self._build_tool_policy(has_tools=has_tools)
-
-            # Build configuration
-            instructions_text = self.final_instructions
-            extra_blocks = [TERMINATION_GUIDANCE]
-            if self.tool_instruction_text:
-                extra_blocks.append(self.tool_instruction_text)
-            instructions_text = "\n\n".join([instructions_text] + extra_blocks) if extra_blocks else instructions_text
-
-            fc_mode_value = None
-            if tool_policy:
-                mode_attr = tool_policy.get("mode")
-                fc_mode_value = getattr(mode_attr, "value", mode_attr)
-                self._tool_policy = tool_policy
-            else:
-                self._tool_policy = None
-
-            config_payload = self._build_live_connect_config(instructions_text, gemini_function_declarations)
-
-            if self._debug_enabled():
-                tool_config_mode = fc_mode_value or ("AUTO" if has_tools else "DISABLED")
+            # Log debug info
+            if DEBUG == 'true':
                 try:
-                    config_preview = config_payload.model_dump(exclude_none=True)
-                except AttributeError:
-                    config_preview = config_payload
-                debug_connect_payload = {
-                    "model": self.model,
-                    "voice": self.voice,
-                    "temperature": self.temperature,
-                    "max_output_tokens": self.max_output_tokens,
-                    "tool_names": logged_function_names,
-                    "tool_choice": self.custom_tool_choice,
-                    "tool_config_mode": tool_config_mode,
-                    "instructions_preview": instructions_text[:800] if instructions_text else None,
-                    "config": config_preview
-                }
-                self._debug_log_payload("[FunctionCall] Gemini connect configuration", debug_connect_payload)
+                    config_dict = config.model_dump(exclude_none=True)
+                    self.logger.debug(f"[FunctionCall] Config: {format_json(config_dict)}")
+                except:
+                    pass
 
-            # Connect to Live API via async context manager to match SDK docs
-            self.logger.info(f"Initiating Gemini Live API connection with model: {self.model}")
+            # Connect using async context manager (as per SDK docs)
+            self.logger.info(f"Connecting to Gemini Live API: {self.model}")
+            connect_start = time.time()
+
             session_cm = self.client.aio.live.connect(
                 model=self.model,
-                config=config_payload
+                config=config
             )
 
-            session = await session_cm.__aenter__()
-
-            # Only set state after successful context entry
-            self.session = session
-            self._session_context = session_cm
+            # Enter the context manager
+            self.session = await session_cm.__aenter__()
+            self._session_context_manager = session_cm
 
             connect_time = time.time() - connect_start
             self.logger.info(
-                f"Gemini Live API connection established in {connect_time:.2f}s "
-                f"(model={self.model}, voice={self.voice}, temperature={self.temperature})"
+                f"Gemini Live API connected in {connect_time:.2f}s "
+                f"(model={self.model}, voice={self.voice})"
             )
-            self.running = True
-            self._last_audio_frame_time = time.monotonic()
-            self._start_silence_monitor()
 
-            if has_tools and gemini_function_declarations:
-                mode_label = fc_mode_value or "AUTO"
-                self.logger.info(
-                    f"[FunctionCall] Configured {len(logged_function_names)} Gemini function declarations: {logged_function_names}; function_calling_mode={mode_label}"
-                )
-            else:
-                self.logger.info("[FunctionCall] Gemini session started without custom tools")
+            # Mark as running and start VAD monitor
+            self.running = True
+            self._last_audio_time = time.monotonic()
+            self._start_vad_monitor()
 
             self.retry_count = 0
 
         except Exception as e:
-            self.logger.error(f"Error establishing Gemini connection: {e}", exc_info=True)
-            self.logger.error(f"Model: {self.model}, Voice: {self.voice}, Temperature: {self.temperature}")
+            self.logger.error(f"Failed to connect to Gemini: {e}", exc_info=True)
             await self.close()
-            raise RuntimeError(f"Failed to connect to Gemini Live API: {str(e)}")
+            raise RuntimeError(f"Gemini connection failed: {e}")
 
-    async def _safe_send(self, message: str):
+    def _build_function_declarations(self) -> List[Dict[str, Any]]:
         """
-        Send a message to Gemini. This method exists for compatibility with OpenAI client interface,
-        but most operations use SDK methods like session.send_client_content() instead.
+        Build function declarations in Gemini format.
 
-        For Gemini, this handles OpenAI-format messages that need conversion.
+        Gemini expects:
+        {
+            "name": "function_name",
+            "description": "...",
+            "parameters": {
+                "type": "object",
+                "properties": {...},
+                "required": [...]
+            }
+        }
+
+        Note: Gemini does NOT support "strict" or "additionalProperties"
         """
-        async with self._lock:
-            if not self.running or self.session is None:
-                self.logger.warning("Cannot send message: session not running or not connected")
-                return
+        declarations = []
 
-            try:
-                # Parse the message to check if it's OpenAI format
-                import json
-                msg_dict = json.loads(message)
-                msg_type = msg_dict.get("type", "")
+        # Add call control functions
+        declarations.extend([
+            {
+                "name": "end_conversation_successfully",
+                "description": (
+                    "End the phone call successfully when the customer's request is completely fulfilled "
+                    "AND the customer explicitly confirms they don't need anything else. "
+                    "Provide a summary of what was accomplished."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief summary of what was accomplished in the conversation"
+                        }
+                    },
+                    "required": ["summary"]
+                }
+            },
+            {
+                "name": "end_conversation_with_escalation",
+                "description": (
+                    "End the phone call and transfer to a human agent when the customer requests it "
+                    "or the task cannot be completed by AI. Provide a clear reason for escalation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Clear explanation of why human assistance is needed"
+                        }
+                    },
+                    "required": ["reason"]
+                }
+            }
+        ])
 
-                if DEBUG == 'true':
-                    self.logger.debug(f"_safe_send called with type={msg_type}")
+        # Add custom tools (Genesys data actions, etc.)
+        if self.custom_tool_definitions:
+            for tool in self.custom_tool_definitions:
+                if tool.get("type") != "function":
+                    continue
 
-                # For OpenAI "response.create" messages (used in summary generation),
-                # we don't need to do anything as Gemini's await_summary() handles it differently
-                if msg_type == "response.create":
-                    self.logger.debug("Ignoring OpenAI response.create message - Gemini uses SDK methods")
-                    return
+                # Extract and clean parameters
+                params = tool.get("parameters", {})
+                cleaned_params = self._clean_parameters_for_gemini(params)
 
-                # For other message types, log a warning
-                self.logger.warning(f"_safe_send called with unhandled message type: {msg_type}")
+                func_decl = {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": cleaned_params
+                }
+                declarations.append(func_decl)
 
-            except Exception as e:
-                self.logger.error(f"Error in _safe_send: {e}")
+        return declarations
 
-    def _is_silence_frame(self, pcmu_frame: bytes, pcm16_8k: Optional[bytes] = None) -> bool:
-        """Determine if a Genesys PCMU frame contains only silence bytes."""
-        if not pcmu_frame:
-            return True
-        silence_value = GENESYS_PCMU_SILENCE_BYTE & 0xFF
-        if all(byte == silence_value for byte in pcmu_frame):
-            return True
-
-        if not pcm16_8k:
-            try:
-                pcm16_8k = decode_pcmu_to_pcm16(pcmu_frame)
-            except Exception:
-                pcm16_8k = None
-
-        if not pcm16_8k:
-            return False
-
-        try:
-            samples = memoryview(pcm16_8k).cast('h')
-            if not samples:
-                return True
-            max_amplitude = max(abs(sample) for sample in samples)
-            return max_amplitude < self._pcm16_silence_floor
-        except Exception:
-            return False
-
-    async def _flush_audio_stream_if_needed(self, force: bool = False):
+    def _clean_parameters_for_gemini(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Flush pending realtime audio input when the caller is silent or when the session ends.
+        Remove OpenAI-specific fields from parameter schema.
 
-        Gemini Live expects an explicit `audio_stream_end` marker when the upstream stream pauses
-        for more than ~1 second (per docs). Without it, VAD may not hand control back to the model.
+        Gemini does NOT support:
+        - "strict": OpenAI structured outputs
+        - "additionalProperties": Can cause schema validation issues
         """
-        if not self.session:
-            return
-        if not self.running and not force:
-            return
+        if not isinstance(params, dict):
+            return params
 
-        should_flush = force or (
-            self._audio_stream_open and self._consecutive_silence_frames >= self._silence_frame_threshold
+        # Deep copy to avoid modifying original
+        import copy
+        cleaned = copy.deepcopy(params)
+
+        # Remove unsupported fields
+        cleaned.pop("strict", None)
+        cleaned.pop("additionalProperties", None)
+
+        # Recursively clean nested objects
+        if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+            for key, value in cleaned["properties"].items():
+                if isinstance(value, dict):
+                    cleaned["properties"][key] = self._clean_parameters_for_gemini(value)
+
+        if "items" in cleaned and isinstance(cleaned["items"], dict):
+            cleaned["items"] = self._clean_parameters_for_gemini(cleaned["items"])
+
+        return cleaned
+
+    def _build_config(
+        self,
+        system_instruction: str,
+        function_declarations: List[Dict[str, Any]]
+    ) -> types.LiveConnectConfig:
+        """
+        Build Gemini Live API configuration.
+
+        Following official docs pattern:
+        https://ai.google.dev/gemini-api/docs/live
+        """
+        # Speech configuration (voice)
+        speech_config = types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=self.voice
+                )
+            )
         )
-        if not should_flush:
-            return
 
-        try:
-            if self._manual_activity_detection:
-                await self._send_activity_end()
-            else:
-                await self.session.send_realtime_input(audio_stream_end=True)
-                self.logger.debug("[Gemini] Sent audio_stream_end to flush paused audio stream")
-        except Exception as exc:
-            self.logger.error("Error signaling end of audio segment: %s", exc, exc_info=True)
-        finally:
-            self._audio_stream_open = False
-            self._consecutive_silence_frames = 0
+        # VAD configuration - using automatic mode as per Gemini docs
+        realtime_input_config = types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=False,  # Use Gemini's automatic VAD
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                prefix_padding_ms=20,
+                silence_duration_ms=900  # ~1 second as per docs
+            )
+        )
+
+        # Build config
+        config_dict = {
+            "response_modalities": [types.Modality.AUDIO],
+            "speech_config": speech_config,
+            "system_instruction": system_instruction,
+            "temperature": self.temperature,
+            "realtime_input_config": realtime_input_config,
+            # Enable transcriptions for debugging
+            "input_audio_transcription": types.AudioTranscriptionConfig(),
+            "output_audio_transcription": types.AudioTranscriptionConfig(),
+        }
+
+        if self.max_output_tokens is not None:
+            config_dict["max_output_tokens"] = self.max_output_tokens
+
+        # Add tools if we have function declarations
+        # Following Gemini docs: tools = [{"function_declarations": [...]}]
+        if function_declarations:
+            # Convert dict declarations to typed FunctionDeclaration objects
+            typed_declarations = []
+            for decl in function_declarations:
+                typed_decl = types.FunctionDeclaration(
+                    name=decl["name"],
+                    description=decl.get("description", ""),
+                    parameters=decl.get("parameters")
+                )
+                typed_declarations.append(typed_decl)
+
+            # Wrap in Tool object
+            config_dict["tools"] = [types.Tool(function_declarations=typed_declarations)]
+
+            self.logger.info(
+                f"[FunctionCall] Configured {len(typed_declarations)} function declarations for Gemini"
+            )
+
+        return types.LiveConnectConfig(**config_dict)
 
     async def send_audio(self, pcmu_8k: bytes):
-        """Send audio to Gemini (convert PCMU 8kHz to PCM16 16kHz)."""
+        """
+        Send audio from Genesys (PCMU 8kHz) to Gemini (PCM16 16kHz).
+
+        Following Gemini docs pattern:
+        session.sendRealtimeInput({ audio: { data: base64Audio, mimeType: "audio/pcm;rate=16000" } })
+        """
         if not self.running or self.session is None:
-            if DEBUG == 'true':
-                self.logger.warning(f"Dropping audio frame: running={self.running}, session={self.session is not None}")
             return
 
         try:
+            # Convert PCMU 8kHz to PCM16 8kHz
             pcm16_8k = decode_pcmu_to_pcm16(pcmu_8k)
-            self._last_audio_frame_time = time.monotonic()
-            silence_frame = self._is_silence_frame(pcmu_8k, pcm16_8k)
-            if silence_frame:
+
+            # Update activity timestamp
+            self._last_audio_time = time.monotonic()
+
+            # Check if silence
+            is_silence = self._is_silence(pcm16_8k)
+
+            if is_silence:
                 self._consecutive_silence_frames += 1
-                await self._flush_audio_stream_if_needed()
-                if not self._audio_stream_open:
-                    return  # drop redundant silence once the stream is flushed
+                # Flush stream after ~1 second of silence
+                if self._consecutive_silence_frames >= VAD_SILENCE_THRESHOLD_FRAMES:
+                    await self._flush_audio_stream()
+                    return  # Don't send silence frames after flush
             else:
                 self._consecutive_silence_frames = 0
+                # Open audio stream if closed
                 if not self._audio_stream_open:
-                    if self._manual_activity_detection:
-                        await self._ensure_activity_started()
                     self._audio_stream_open = True
 
-            # Resample PCM16 8kHz (Genesys) to PCM16 16kHz (Gemini)
+            # Resample to 16kHz (Gemini's expected input rate)
             pcm16_16k = resample_audio(pcm16_8k, 8000, 16000, 2)
 
-            self.logger.debug(f"Sending audio to Gemini: {len(pcm16_16k)} bytes PCM16 16kHz")
-
-            # Send as realtime input (Gemini Live SDK expects exactly one argument per call)
+            # Send to Gemini as realtime input
             await self.session.send_realtime_input(
                 audio=types.Blob(
                     data=pcm16_16k,
                     mime_type="audio/pcm;rate=16000"
                 )
             )
+
             self._has_audio_in_buffer = True
 
         except Exception as e:
-            self.logger.error(f"Error sending audio to Gemini: {e}")
+            self.logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
 
-    async def _ensure_activity_started(self):
-        if not self._manual_activity_detection:
-            return
-        if self._activity_in_progress or not self.session or not self.running:
-            return
+    def _is_silence(self, pcm16_data: bytes) -> bool:
+        """Check if PCM16 audio frame is silence."""
+        if not pcm16_data:
+            return True
+
         try:
-            await self.session.send_realtime_input(activity_start=types.ActivityStart())
-            self._activity_in_progress = True
-            self.logger.debug("[Gemini] Sent activity_start (manual VAD)")
-        except Exception as exc:
-            self.logger.error(f"Error sending activity_start: {exc}", exc_info=True)
+            # Convert bytes to int16 samples
+            import array
+            samples = array.array('h', pcm16_data)
+            if not samples:
+                return True
 
-    async def _send_activity_end(self):
-        if not self._manual_activity_detection:
+            # Check if all samples below threshold
+            max_amplitude = max(abs(s) for s in samples)
+            return max_amplitude < PCM16_SILENCE_FLOOR
+        except:
+            return False
+
+    async def _flush_audio_stream(self):
+        """Flush audio stream when user stops speaking (as per Gemini docs)."""
+        if not self._audio_stream_open or not self.session:
             return
-        if not self._activity_in_progress or not self.session:
-            return
+
         try:
-            await self.session.send_realtime_input(activity_end=types.ActivityEnd())
-            self.logger.debug("[Gemini] Sent activity_end (manual VAD)")
-        except Exception as exc:
-            self.logger.error(f"Error sending activity_end: {exc}", exc_info=True)
-        finally:
-            self._activity_in_progress = False
-            self._pending_transcript.clear()
+            # Send audio_stream_end signal (as per Gemini docs)
+            await self.session.send_realtime_input(audio_stream_end=True)
+            self.logger.debug("[Gemini] Sent audio_stream_end")
 
-    async def _handle_input_transcription(self, transcription):
-        """
-        Accumulate partial transcripts and finalize the user turn when Gemini marks it finished.
-        """
-        try:
-            text_fragment = (getattr(transcription, "text", "") or "").strip()
-            finished = bool(getattr(transcription, "finished", False))
-        except Exception:
-            text_fragment = ""
-            finished = False
+            self._audio_stream_open = False
+            self._consecutive_silence_frames = 0
 
-        if text_fragment:
-            self._pending_transcript.append(text_fragment)
-
-        if finished:
-            transcript_text = " ".join(self._pending_transcript).strip()
-            if transcript_text:
-                self.logger.info(f"[Gemini] Final input transcript captured: '{transcript_text}'")
-            await self._flush_audio_stream_if_needed(force=True)
+        except Exception as e:
+            self.logger.error(f"Error flushing audio stream: {e}", exc_info=True)
 
     async def start_receiving(self, on_audio_callback):
-        """Start receiving responses from Gemini."""
+        """
+        Start receiving responses from Gemini.
+
+        Handles:
+        - Audio data (PCM16 24kHz -> PCMU 8kHz)
+        - Server content (turn completion, tool calls)
+        - Function calls
+        - Token usage tracking
+        """
         if not self.running or not self.session:
-            self.logger.warning(f"Cannot start receiving: running={self.running}, session={self.session is not None}")
+            self.logger.warning("Cannot start receiving: session not ready")
             return
+
         self._on_audio_callback = on_audio_callback
         self._pending_pcmu_bytes.clear()
 
@@ -703,419 +596,324 @@ class GeminiRealtimeClient:
                         break
 
                     try:
-                        server_content = getattr(message, "server_content", None)
-                        usage_metadata = getattr(message, "usage_metadata", None)
-
-                        if self._debug_enabled():
-                            message_summary = {
-                                "message_type": type(message).__name__,
-                                "has_data": message.data is not None,
-                                "data_bytes": len(message.data) if message.data else 0,
-                                "has_server_content": bool(server_content),
-                                "has_tool_call": bool(getattr(message, "tool_call", None)),
-                                "has_tool_call_cancellation": bool(getattr(message, "tool_call_cancellation", None))
-                            }
-                            if usage_metadata:
-                                message_summary["usage_metadata"] = self._coerce_to_serializable(usage_metadata)
-                            self._debug_log_payload("[FunctionCall] Gemini live message", message_summary, max_chars=4000)
-
-                        # Handle audio data
+                        # Process audio data
                         if message.data is not None:
-                            # Gemini sends PCM16 24kHz, need to convert to PCMU 8kHz (Genesys)
-                            try:
-                                pcm16_24k = message.data
-                                self.logger.debug(f"Received audio from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
+                            self._process_audio_output(message.data)
 
-                                # Convert PCM16 24kHz to PCMU 8kHz using efficient audioop
-                                pcmu_8k = pcm16_24k_to_pcmu_8k(pcm16_24k)
-                                self._buffer_and_emit_pcmu(pcmu_8k)
+                        # Process server content (tool calls, turn completion, etc.)
+                        if message.server_content:
+                            await self._process_server_content(message.server_content)
 
-                            except Exception as audio_err:
-                                self.logger.error(f"Error processing audio from Gemini: {audio_err}", exc_info=True)
+                        # Process tool calls (alternative path)
+                        if message.tool_call:
+                            await self._process_tool_call(message.tool_call)
 
-                        # Handle server content (turn completion, tool calls, etc.)
-                        if server_content:
-                            if self._debug_enabled() or self._diagnostics_enabled_flag():
-                                model_turn = getattr(server_content, "model_turn", None)
-                                server_summary = {
-                                    "turn_complete": bool(server_content.turn_complete),
-                                    "interrupted": getattr(server_content, "interrupted", False),
-                                    "has_model_turn": bool(model_turn),
-                                    "model_turn_parts": len(getattr(model_turn, "parts", None) or [])
-                                }
-                                if getattr(server_content, "grounding_metadata", None):
-                                    server_summary["grounding_metadata"] = self._coerce_to_serializable(
-                                        server_content.grounding_metadata
-                                    )
-                                if self._debug_enabled():
-                                    self._debug_log_payload("[FunctionCall] Gemini server_content summary", server_summary, max_chars=4000)
-                                if self._diagnostics_enabled_flag():
-                                    diag_summary = {k: v for k, v in server_summary.items() if k != "grounding_metadata"}
-                                    self._diagnostic_log("server_content", diag_summary)
-
-                            input_transcription = getattr(server_content, "input_transcription", None)
-                            if input_transcription and getattr(input_transcription, "text", None):
-                                self.logger.info(
-                                    f"[Gemini] Input transcription: '{input_transcription.text}' "
-                                    f"(final={getattr(input_transcription, 'finished', False)})"
-                                )
-                                await self._handle_input_transcription(input_transcription)
-                            output_transcription = getattr(server_content, "output_transcription", None)
-                            if output_transcription and getattr(output_transcription, "text", None):
-                                self.logger.debug(
-                                    f"[Gemini] Output transcription: '{output_transcription.text}' "
-                                    f"(final={getattr(output_transcription, 'finished', False)})"
-                                )
-
-                            # Track tokens
-                            if usage_metadata:
-                                await self._update_token_metrics(usage_metadata)
-
-                            # Handle turn complete
-                            if server_content.turn_complete:
-                                self._response_in_progress = False
-                                self.logger.info("[FunctionCall] Turn complete from Gemini")
-                                self._buffer_and_emit_pcmu(b"", force_flush=True)
-                                if self._diagnostics_enabled_flag():
-                                    diag_usage = {
-                                        "prompt_tokens": getattr(usage_metadata, "prompt_token_count", None) if usage_metadata else None,
-                                        "candidate_tokens": getattr(usage_metadata, "candidates_token_count", None) if usage_metadata else None,
-                                        "disconnect_pending": bool(self._await_disconnect_on_done),
-                                        "action_context": self._disconnect_context.get("action") if self._disconnect_context else None
-                                    }
-                                    self._diagnostic_log("turn_complete", diag_usage)
-
-                                # Check if we need to disconnect
-                                if self._await_disconnect_on_done and self._disconnect_context:
-                                    ctx = self._disconnect_context
-                                    self._await_disconnect_on_done = False
-                                    self._disconnect_context = None
-                                    try:
-                                        if ctx.get("action") == "end_conversation_successfully":
-                                            if callable(self.on_end_call_request):
-                                                await self.on_end_call_request(ctx.get("reason", "completed"), ctx.get("info", ""))
-                                        elif ctx.get("action") == "end_conversation_with_escalation":
-                                            if callable(self.on_handoff_request):
-                                                await self.on_handoff_request("transfer", ctx.get("info", ""))
-                                            elif callable(self.on_end_call_request):
-                                                await self.on_end_call_request("transfer", ctx.get("info", ""))
-                                    except Exception as e:
-                                        self.logger.error(f"[FunctionCall] Exception invoking disconnect callback: {e}", exc_info=True)
-
-                            # Handle model turn (contains function calls)
-                            model_turn = getattr(server_content, "model_turn", None)
-                            if model_turn:
-                                self._response_in_progress = True
-                                parts = getattr(model_turn, "parts", None) or []
-
-                                part_summaries: List[Dict[str, Any]] = []
-                                diag_function_names: List[Optional[str]] = []
-                                diag_text_parts = 0
-                                diag_part_types: List[str] = []
-
-                                collecting_debug = self._debug_enabled()
-                                collecting_diag = self._diagnostics_enabled_flag()
-
-                                if collecting_debug or collecting_diag:
-                                    for idx, part in enumerate(parts):
-                                        diag_part_types.append(type(part).__name__)
-                                        if getattr(part, "text", None):
-                                            diag_text_parts += 1
-                                        func_call = getattr(part, "function_call", None)
-                                        if func_call:
-                                            diag_function_names.append(getattr(func_call, "name", None))
-                                        if collecting_debug:
-                                            part_summary = {
-                                                "index": idx,
-                                                "type": type(part).__name__,
-                                                "has_function_call": bool(func_call),
-                                                "has_text": bool(getattr(part, "text", None))
-                                            }
-                                            if func_call:
-                                                fc_summary = {
-                                                    "name": getattr(func_call, "name", None),
-                                                    "id": getattr(func_call, "id", None),
-                                                    "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
-                                                }
-                                                part_summary["function_call"] = fc_summary
-                                            part_summaries.append(part_summary)
-
-                                if collecting_debug and part_summaries:
-                                    self._debug_log_payload("[FunctionCall] Gemini model_turn parts", part_summaries, max_chars=6000)
-                                if collecting_diag:
-                                    diag_payload = {
-                                        "total_parts": len(parts),
-                                        "function_call_names": diag_function_names[:5],
-                                        "function_call_count": len(diag_function_names),
-                                        "text_part_count": diag_text_parts,
-                                        "part_types": diag_part_types[:10]
-                                    }
-                                    self._diagnostic_log("model_turn", diag_payload)
-
-                                # Process parts for function calls
-                                for part in parts:
-                                    if part.function_call:
-                                        func_call = part.function_call
-                                        name = func_call.name
-                                        args = func_call.args if hasattr(func_call, 'args') else {}
-                                        call_id = func_call.id if hasattr(func_call, 'id') else str(time.time())
-
-                                        self.logger.info(f"[FunctionCall] Detected function call: name={name}, id={call_id}")
-                                        if self._debug_enabled():
-                                            self._debug_log_payload(
-                                                f"[FunctionCall] Gemini function call args name={name} id={call_id}",
-                                                args or {},
-                                                max_chars=2000
-                                            )
-                                        await self._handle_function_call(name, call_id, args)
-
-                            # Handle grounding metadata (if using Google Search)
-                            if hasattr(server_content, 'grounding_metadata') and server_content.grounding_metadata:
-                                self.logger.info(f"[Grounding] Received grounding metadata")
-
-                            if getattr(server_content, "interrupted", False):
-                                if self._pending_pcmu_bytes:
-                                    self.logger.info(
-                                        f"Generation interrupted; dropping {len(self._pending_pcmu_bytes)} pending PCMU bytes"
-                                    )
-                                    self._pending_pcmu_bytes.clear()
-
-                        # Handle live tool calls emitted outside of server_content (Bidi tool stream)
-                        if message.tool_call and getattr(message.tool_call, "function_calls", None):
-                            function_calls = message.tool_call.function_calls or []
-                            if self._debug_enabled():
-                                tool_call_summary = []
-                                for func_call in function_calls:
-                                    tool_call_summary.append(
-                                        {
-                                            "id": getattr(func_call, "id", None),
-                                            "name": getattr(func_call, "name", None),
-                                            "args_preview": self._debug_preview(getattr(func_call, "args", None), max_chars=800)
-                                        }
-                                    )
-                                self._debug_log_payload("[FunctionCall] Gemini live tool_call payload", tool_call_summary, max_chars=6000)
-                            self.logger.info(f"[FunctionCall] Received {len(function_calls)} Gemini tool call(s)")
-                            for func_call in function_calls:
-                                try:
-                                    name = getattr(func_call, "name", None)
-                                    args = getattr(func_call, "args", {}) or {}
-                                    call_id = getattr(func_call, "id", None) or str(time.time())
-                                    self.logger.info(f"[FunctionCall] Detected live tool call: name={name}, id={call_id}")
-                                    await self._handle_function_call(name, call_id, args)
-                                except Exception as fc_err:
-                                    self.logger.error(f"[FunctionCall] Error handling live tool call: {fc_err}", exc_info=True)
-                            if self._diagnostics_enabled_flag():
-                                diag_payload = {
-                                    "live_function_calls": [
-                                        getattr(func_call, "name", None) for func_call in function_calls
-                                    ],
-                                    "count": len(function_calls)
-                                }
-                                self._diagnostic_log("live_tool_call", diag_payload)
-
-                        if message.tool_call_cancellation:
-                            cancel = message.tool_call_cancellation
-                            cancel_id = getattr(cancel, "id", "unknown")
-                            self.logger.warning(f"[FunctionCall] Gemini cancelled tool call id={cancel_id}")
-                            if self._debug_enabled():
-                                cancel_payload = {
-                                    "id": cancel_id,
-                                    "details": self._coerce_to_serializable(cancel)
-                                }
-                                self._debug_log_payload("[FunctionCall] Gemini tool call cancellation", cancel_payload, max_chars=2000)
-                            if self._diagnostics_enabled_flag():
-                                self._diagnostic_log("tool_call_cancellation", {"id": cancel_id})
+                        # Track token usage
+                        if message.usage_metadata:
+                            self._update_token_tracking(message.usage_metadata)
 
                     except Exception as msg_err:
-                        self.logger.error(f"Error processing Gemini message: {msg_err}", exc_info=True)
+                        self.logger.error(f"Error processing message: {msg_err}", exc_info=True)
 
             except Exception as e:
-                self.logger.error(f"Error in Gemini read loop: {e}", exc_info=True)
+                self.logger.error(f"Error in receive loop: {e}", exc_info=True)
                 self.running = False
 
         self.read_task = asyncio.create_task(_read_loop())
 
-    async def _update_token_metrics(self, usage_metadata):
+    def _process_audio_output(self, pcm16_24k: bytes):
         """
-        Update token tracking from Gemini usage metadata.
+        Process audio from Gemini (PCM16 24kHz) and convert to Genesys format (PCMU 8kHz).
 
-        For Gemini Live API:
-        - usage_metadata.prompt_token_count = total input tokens for this turn
-        - usage_metadata.candidates_token_count = total output tokens for this turn
-        - Gemini Live API doesn't break down by modality, but for audio conversations,
-          most tokens are audio tokens (input: 1 token/100ms, output: 1 token/50ms)
+        Gemini outputs PCM16 at 24kHz, but Genesys expects PCMU at 8kHz.
         """
         try:
-            # Update totals (these are cumulative from Gemini)
-            if hasattr(usage_metadata, 'total_token_count'):
-                total = usage_metadata.total_token_count
-            if hasattr(usage_metadata, 'prompt_token_count'):
-                prompt_tokens_this_turn = usage_metadata.prompt_token_count
-                self._total_prompt_tokens = prompt_tokens_this_turn
+            self.logger.debug(f"Received audio from Gemini: {len(pcm16_24k)} bytes (PCM16 24kHz)")
 
-            if hasattr(usage_metadata, 'candidates_token_count'):
-                candidates_tokens_this_turn = usage_metadata.candidates_token_count
-                self._total_candidates_tokens = candidates_tokens_this_turn
+            # Convert PCM16 24kHz to PCMU 8kHz
+            pcmu_8k = pcm16_24k_to_pcmu_8k(pcm16_24k)
 
-            # For Live API audio conversations, tokens are primarily audio
-            # Accumulate input audio tokens from this turn
-            if prompt_tokens_this_turn > 0:
-                self._token_details['input_audio_tokens'] += prompt_tokens_this_turn
-
-            # Update detailed breakdown by modality (cumulative values from Gemini)
-            if hasattr(usage_metadata, 'prompt_token_count_details'):
-                details = usage_metadata.prompt_token_count_details
-                if hasattr(details, 'audio_tokens'):
-                    self._token_details['input_audio_tokens'] = details.audio_tokens
-                if hasattr(details, 'text_tokens'):
-                    self._token_details['input_text_tokens'] = details.text_tokens
-                if hasattr(details, 'cached_content_token_count'):
-                    self._token_details['input_cached_audio_tokens'] = details.cached_content_token_count
-
-            if hasattr(usage_metadata, 'candidates_token_count_details'):
-                details = usage_metadata.candidates_token_count_details
-                if hasattr(details, 'audio_tokens'):
-                    self._token_details['output_audio_tokens'] = details.audio_tokens
-                if hasattr(details, 'text_tokens'):
-                    self._token_details['output_text_tokens'] = details.text_tokens
-
-            # Legacy fallback: If no detailed breakdown, estimate based on totals
-            # For realtime audio conversations, most tokens are audio
-            if self._token_details['input_audio_tokens'] == 0 and self._total_prompt_tokens > 0:
-                self._token_details['input_audio_tokens'] = self._total_prompt_tokens
-
-            if self._token_details['output_audio_tokens'] == 0 and self._total_candidates_tokens > 0:
-                self._token_details['output_audio_tokens'] = self._total_candidates_tokens
-
-            if DEBUG == 'true':
-                self.logger.debug(
-                    f"Token metrics updated: prompt={self._total_prompt_tokens}, "
-                    f"candidates={self._total_candidates_tokens}, "
-                    f"input_audio={self._token_details['input_audio_tokens']}, "
-                    f"output_audio={self._token_details['output_audio_tokens']}"
-                )
+            # Buffer and emit in proper frame sizes
+            self._buffer_and_send_pcmu(pcmu_8k)
 
         except Exception as e:
-            self.logger.error(f"Error updating token metrics: {e}", exc_info=True)
+            self.logger.error(f"Error processing audio output: {e}", exc_info=True)
 
-    async def _handle_function_call(self, name: str, call_id: str, args: dict):
-        """Handle function calls from Gemini."""
+    def _buffer_and_send_pcmu(self, pcmu_data: bytes, flush: bool = False):
+        """Buffer PCMU data and send in correct frame sizes to Genesys."""
+        if pcmu_data:
+            self._pending_pcmu_bytes.extend(pcmu_data)
+
+        # Send complete frames
+        while len(self._pending_pcmu_bytes) >= self._pcmu_frame_size:
+            frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
+            del self._pending_pcmu_bytes[:self._pcmu_frame_size]
+            self._send_pcmu_frame(frame)
+
+        # Flush remaining data with padding if needed
+        if flush and self._pending_pcmu_bytes:
+            # Pad to frame size
+            pad_len = self._pcmu_frame_size - len(self._pending_pcmu_bytes)
+            self._pending_pcmu_bytes.extend(bytes([GENESYS_PCMU_SILENCE_BYTE]) * pad_len)
+
+            while self._pending_pcmu_bytes:
+                frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
+                del self._pending_pcmu_bytes[:self._pcmu_frame_size]
+                self._send_pcmu_frame(frame)
+
+    def _send_pcmu_frame(self, frame: bytes):
+        """Send a PCMU frame to Genesys via callback."""
+        if self._on_audio_callback:
+            try:
+                self._on_audio_callback(frame)
+            except Exception as e:
+                self.logger.error(f"Error in audio callback: {e}", exc_info=True)
+
+    async def _process_server_content(self, server_content):
+        """
+        Process server content from Gemini.
+
+        Handles:
+        - Turn completion
+        - Model turns (containing function calls)
+        - Interruptions
+        - Transcriptions
+        """
         try:
-            self.logger.info(f"[FunctionCall] Handling function call: name={name}, call_id={call_id}")
-            if self._debug_enabled():
-                self._debug_log_payload(
-                    f"[FunctionCall] Received args for {name} (call_id={call_id})",
-                    args or {},
-                    max_chars=2000
-                )
-            if self._diagnostics_enabled_flag():
-                diag_payload = {
-                    "name": name,
-                    "call_id": call_id,
-                    "arg_keys": sorted(list((args or {}).keys()))
-                }
-                self._diagnostic_log("function_call_received", diag_payload)
+            # Log transcriptions
+            if hasattr(server_content, 'input_transcription'):
+                transcript = server_content.input_transcription
+                if transcript and hasattr(transcript, 'text') and transcript.text:
+                    self.logger.info(f"[Gemini] Input: '{transcript.text}'")
+
+            if hasattr(server_content, 'output_transcription'):
+                transcript = server_content.output_transcription
+                if transcript and hasattr(transcript, 'text') and transcript.text:
+                    self.logger.debug(f"[Gemini] Output: '{transcript.text}'")
+
+            # Handle turn complete
+            if server_content.turn_complete:
+                self._response_in_progress = False
+                self.logger.info("[FunctionCall] Turn complete from Gemini")
+
+                # Flush any remaining audio
+                self._buffer_and_send_pcmu(b"", flush=True)
+
+                # Check if we need to disconnect after this turn
+                if self._await_disconnect_on_done and self._disconnect_context:
+                    await self._handle_disconnect_callback()
+
+            # Handle model turn (contains function calls)
+            if hasattr(server_content, 'model_turn') and server_content.model_turn:
+                self._response_in_progress = True
+                model_turn = server_content.model_turn
+
+                if hasattr(model_turn, 'parts') and model_turn.parts:
+                    for part in model_turn.parts:
+                        # Check for function call in part
+                        if hasattr(part, 'function_call') and part.function_call:
+                            await self._handle_function_call_from_part(part.function_call)
+
+            # Handle interruptions
+            if hasattr(server_content, 'interrupted') and server_content.interrupted:
+                self.logger.info("[Gemini] Generation interrupted")
+                self._pending_pcmu_bytes.clear()
+
+        except Exception as e:
+            self.logger.error(f"Error processing server content: {e}", exc_info=True)
+
+    async def _process_tool_call(self, tool_call):
+        """Process tool call message (alternative path for function calls)."""
+        try:
+            if not hasattr(tool_call, 'function_calls'):
+                return
+
+            function_calls = tool_call.function_calls or []
+            self.logger.info(f"[FunctionCall] Received {len(function_calls)} tool call(s)")
+
+            for func_call in function_calls:
+                await self._handle_function_call_from_part(func_call)
+
+        except Exception as e:
+            self.logger.error(f"Error processing tool call: {e}", exc_info=True)
+
+    async def _handle_function_call_from_part(self, function_call):
+        """
+        Handle a function call from Gemini.
+
+        Following Gemini docs pattern:
+        - Extract name, id, and args from function_call
+        - Execute the function (or call handler)
+        - Send response back using session.send_tool_response()
+        """
+        try:
+            # Extract function call details
+            name = getattr(function_call, 'name', None)
+            call_id = getattr(function_call, 'id', None) or str(time.time())
+            args = getattr(function_call, 'args', {}) or {}
 
             if not name:
-                self.logger.error(f"[FunctionCall] ERROR: Function name is empty for call_id={call_id}")
+                self.logger.error("[FunctionCall] Missing function name")
                 return
 
-            if not self._is_tool_call_permitted(name):
-                self.logger.warning(
-                    f"[FunctionCall] Tool call blocked by policy (mode={self._tool_policy.get('mode') if self._tool_policy else 'AUTO'}): {name}"
-                )
-                rejection_payload = {
-                    "result": "error",
-                    "error": "Tool invocation disabled by configuration",
-                    "tool": name
-                }
-                try:
-                    await self.session.send_tool_response(function_responses=[
-                        types.FunctionResponse(
-                            id=call_id,
-                            name=name,
-                            response=rejection_payload
-                        )
-                    ])
-                except Exception as rejection_err:
-                    self.logger.error(f"[FunctionCall] Failed to send rejection for {name}: {rejection_err}", exc_info=True)
-                return
+            self.logger.info(f"[FunctionCall] Calling: {name}(id={call_id})")
+            if DEBUG == 'true':
+                self.logger.debug(f"[FunctionCall] Args: {format_json(args)}")
 
-            # Check if this is a Genesys tool
+            # Route to appropriate handler
             if name in self.genesys_tool_handlers:
-                await self._handle_genesys_tool_call(name, call_id, args or {})
-                return
-
-            # Handle call control functions
-            output_payload = {}
-            action = None
-            info = None
-            closing_instruction = None
-
-            if name in ("end_call", "end_conversation_successfully"):
-                action = "end_conversation_successfully"
-                summary = (args or {}).get("summary") or "Customer confirmed the request was completed."
-                info = summary
-                output_payload = {"result": "ok", "action": action, "summary": summary}
-                self._disconnect_context = {"action": action, "reason": "completed", "info": info}
-                self._await_disconnect_on_done = True
-                # Use custom SUCCESS_PROMPT if provided, otherwise use default
-                if self.success_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
-                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
-                else:
-                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
-            elif name in ("handoff_to_human", "end_conversation_with_escalation"):
-                action = "end_conversation_with_escalation"
-                reason = (args or {}).get("reason") or "Caller requested escalation"
-                output_payload = {"result": "ok", "action": action, "reason": reason}
-                info = reason
-                self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
-                self._await_disconnect_on_done = True
-                # Use custom ESCALATION_PROMPT if provided, otherwise use default
-                if self.escalation_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
-                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
-                else:
-                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Genesys data action
+                await self._handle_genesys_data_action(name, call_id, args)
             else:
-                self.logger.warning(f"[FunctionCall] Unknown function called: {name}")
-                output_payload = {"result": "error", "error": f"Unknown function: {name}"}
+                # Call control function
+                await self._handle_call_control_function(name, call_id, args)
 
-            if self._debug_enabled():
-                response_debug = {
-                    "action": action,
-                    "info": info,
-                    "output_payload": output_payload,
-                    "closing_instruction": closing_instruction
-                }
-                self._debug_log_payload(
-                    f"[FunctionCall] Gemini function response payload name={name} id={call_id}",
-                    response_debug,
-                    max_chars=3000
-                )
+        except Exception as e:
+            self.logger.error(f"[FunctionCall] Error handling function call: {e}", exc_info=True)
 
-            # Send function response back to Gemini
+    async def _handle_genesys_data_action(self, name: str, call_id: str, args: Dict[str, Any]):
+        """
+        Execute a Genesys data action and send response to Gemini.
+
+        Following Gemini docs pattern for tool responses:
+        session.sendToolResponse({
+            functionResponses: [{
+                id: fc.id,
+                name: fc.name,
+                response: { result: "ok" }
+            }]
+        })
+        """
+        handler = self.genesys_tool_handlers.get(name)
+        if not handler:
+            self.logger.error(f"[FunctionCall] No handler for {name}")
+            return
+
+        try:
+            self.logger.info(f"[FunctionCall] Executing Genesys data action: {name}")
+
+            # Call the handler
+            result = await handler(args)
+
+            # Build response payload
+            response_payload = {
+                "status": "ok",
+                "tool": name,
+                "result": result or {}
+            }
+
+            self.logger.info(f"[FunctionCall] Genesys action {name} completed successfully")
+
+        except Exception as e:
+            self.logger.error(f"[FunctionCall] Genesys action {name} failed: {e}", exc_info=True)
+            response_payload = {
+                "status": "error",
+                "tool": name,
+                "error_type": type(e).__name__,
+                "message": str(e)
+            }
+
+        # Send response back to Gemini (as per docs)
+        try:
             function_response = types.FunctionResponse(
                 id=call_id,
                 name=name,
-                response=output_payload
+                response=response_payload
             )
 
             await self.session.send_tool_response(
                 function_responses=[function_response]
             )
 
-            self.logger.info(f"[FunctionCall] Sent function response for {name} (call_id={call_id})")
+            self.logger.info(f"[FunctionCall] Sent tool response for {name}")
 
+        except Exception as send_err:
+            self.logger.error(f"[FunctionCall] Failed to send tool response: {send_err}", exc_info=True)
+
+    async def _handle_call_control_function(self, name: str, call_id: str, args: Dict[str, Any]):
+        """
+        Handle call control functions (end_conversation_successfully, end_conversation_with_escalation).
+
+        These functions trigger the call to end, so we:
+        1. Send the function response to Gemini
+        2. Send a closing instruction to get farewell message
+        3. Schedule disconnect after the farewell completes
+        """
+        try:
+            response_payload = {}
+            action = None
+            info = None
+            closing_instruction = None
+
+            if name in ("end_call", "end_conversation_successfully"):
+                action = "end_conversation_successfully"
+                summary = args.get("summary", "Task completed")
+                info = summary
+
+                response_payload = {
+                    "result": "ok",
+                    "action": action,
+                    "summary": summary
+                }
+
+                # Schedule disconnect
+                self._disconnect_context = {
+                    "action": action,
+                    "reason": "completed",
+                    "info": info
+                }
+                self._await_disconnect_on_done = True
+
+                # Build closing instruction
+                if self.success_prompt:
+                    closing_instruction = f'Say this to the customer: "{self.success_prompt}"'
+                else:
+                    closing_instruction = "Thank the customer briefly and confirm the call is ending."
+
+            elif name in ("handoff_to_human", "end_conversation_with_escalation"):
+                action = "end_conversation_with_escalation"
+                reason = args.get("reason", "Customer requested agent")
+                info = reason
+
+                response_payload = {
+                    "result": "ok",
+                    "action": action,
+                    "reason": reason
+                }
+
+                # Schedule disconnect
+                self._disconnect_context = {
+                    "action": action,
+                    "reason": "transfer",
+                    "info": info
+                }
+                self._await_disconnect_on_done = True
+
+                # Build closing instruction
+                if self.escalation_prompt:
+                    closing_instruction = f'Say this to the customer: "{self.escalation_prompt}"'
+                else:
+                    closing_instruction = "Let the customer know you're transferring them to an agent."
+
+            else:
+                self.logger.warning(f"[FunctionCall] Unknown function: {name}")
+                response_payload = {"result": "error", "error": f"Unknown function: {name}"}
+
+            # Send function response
+            function_response = types.FunctionResponse(
+                id=call_id,
+                name=name,
+                response=response_payload
+            )
+
+            await self.session.send_tool_response(
+                function_responses=[function_response]
+            )
+
+            self.logger.info(f"[FunctionCall] Sent response for {name}")
+
+            # Send closing instruction to trigger farewell
             if closing_instruction and self._disconnect_context:
-                if self._debug_enabled():
-                    self._debug_log_payload(
-                        "[FunctionCall] Closing instruction to Gemini",
-                        {"closing_instruction": closing_instruction},
-                        max_chars=1000
-                    )
-                # Send the closing instruction to make Gemini say the farewell
                 await self.session.send_client_content(
                     turns=types.Content(
                         role="user",
@@ -1123,373 +921,189 @@ class GeminiRealtimeClient:
                     ),
                     turn_complete=True
                 )
+
                 self.logger.info(
-                    f"[FunctionCall] Sent closing instruction to Gemini. Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
+                    f"[FunctionCall] Sent closing instruction. Will disconnect after farewell "
+                    f"(action={action})"
                 )
 
         except Exception as e:
-            self.logger.error(f"[FunctionCall] ERROR: Exception handling function call {name}: {e}", exc_info=True)
+            self.logger.error(f"[FunctionCall] Error in call control handler: {e}", exc_info=True)
 
-    def register_genesys_tool_handlers(self, handlers: Optional[Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]]):
+    async def _handle_disconnect_callback(self):
+        """Execute disconnect callback after turn completes."""
+        if not self._disconnect_context:
+            return
+
+        ctx = self._disconnect_context
+        self._await_disconnect_on_done = False
+        self._disconnect_context = None
+
+        try:
+            action = ctx.get("action")
+            reason = ctx.get("reason", "completed")
+            info = ctx.get("info", "")
+
+            if action == "end_conversation_successfully":
+                if callable(self.on_end_call_request):
+                    await self.on_end_call_request(reason, info)
+
+            elif action == "end_conversation_with_escalation":
+                if callable(self.on_handoff_request):
+                    await self.on_handoff_request("transfer", info)
+                elif callable(self.on_end_call_request):
+                    await self.on_end_call_request("transfer", info)
+
+        except Exception as e:
+            self.logger.error(f"[FunctionCall] Error in disconnect callback: {e}", exc_info=True)
+
+    def _update_token_tracking(self, usage_metadata):
+        """Update token usage tracking from Gemini response."""
+        try:
+            # Gemini provides total counts
+            if hasattr(usage_metadata, 'prompt_token_count'):
+                self._total_input_tokens = usage_metadata.prompt_token_count
+
+            if hasattr(usage_metadata, 'candidates_token_count'):
+                self._total_output_tokens = usage_metadata.candidates_token_count
+
+            # Update detailed breakdown if available
+            if hasattr(usage_metadata, 'prompt_tokens_details'):
+                details = usage_metadata.prompt_tokens_details
+                for detail in details:
+                    modality = getattr(detail, 'modality', None)
+                    count = getattr(detail, 'token_count', 0)
+
+                    if modality == 'TEXT':
+                        self._token_details['input_text'] = count
+                    elif modality == 'AUDIO':
+                        self._token_details['input_audio'] = count
+
+            if hasattr(usage_metadata, 'response_tokens_details'):
+                details = usage_metadata.response_tokens_details
+                for detail in details:
+                    modality = getattr(detail, 'modality', None)
+                    count = getattr(detail, 'token_count', 0)
+
+                    if modality == 'AUDIO':
+                        self._token_details['output_audio'] = count
+
+            # Fallback: if no modality breakdown, assume audio for Live API
+            if self._token_details['input_audio'] == 0 and self._total_input_tokens > 0:
+                self._token_details['input_audio'] = self._total_input_tokens
+
+            if self._token_details['output_audio'] == 0 and self._total_output_tokens > 0:
+                self._token_details['output_audio'] = self._total_output_tokens
+
+        except Exception as e:
+            self.logger.error(f"Error updating token tracking: {e}", exc_info=True)
+
+    def get_token_metrics(self) -> Dict[str, str]:
+        """
+        Get token usage metrics for output variables.
+
+        Returns all values as strings for Genesys output variables.
+        """
+        return {
+            "TOTAL_INPUT_TEXT_TOKENS": str(self._token_details.get('input_text', 0)),
+            "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(self._token_details.get('input_cached', 0)),
+            "TOTAL_INPUT_AUDIO_TOKENS": str(self._token_details.get('input_audio', 0)),
+            "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(0),  # Gemini doesn't provide this separately
+            "TOTAL_OUTPUT_TEXT_TOKENS": str(self._token_details.get('output_text', 0)),
+            "TOTAL_OUTPUT_AUDIO_TOKENS": str(self._token_details.get('output_audio', 0))
+        }
+
+    def register_genesys_tool_handlers(
+        self,
+        handlers: Optional[Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]]
+    ):
         """Register handlers for Genesys data action tools."""
         self.genesys_tool_handlers = handlers or {}
-        handler_count = len(self.genesys_tool_handlers)
-        if handler_count:
-            self.logger.info(f"[FunctionCall] Registered {handler_count} Genesys tool handler(s)")
+        if handlers:
+            self.logger.info(f"[FunctionCall] Registered {len(handlers)} Genesys tool handler(s)")
 
-    def _deliver_pcmu_frame(self, frame: bytes):
-        callback = self._on_audio_callback
-        if not callback:
-            return
-        try:
-            callback(frame)
-        except Exception as callback_err:
-            self.logger.error(f"Error delivering audio frame to Genesys: {callback_err}", exc_info=True)
-
-    def _buffer_and_emit_pcmu(self, pcmu_8k: bytes, force_flush: bool = False):
+    async def _safe_send(self, message: str):
         """
-        Accumulate Gemini PCM16→PCMU output and emit fixed-size frames required by Genesys.
+        Compatibility method for OpenAI-style message sending.
+
+        In Gemini, most operations use SDK methods directly instead of JSON messages.
+        This exists for interface compatibility but is generally not used.
         """
-        if pcmu_8k:
-            self._pending_pcmu_bytes.extend(pcmu_8k)
+        # Most Gemini operations use SDK methods, not raw JSON
+        if DEBUG == 'true':
+            self.logger.debug(f"_safe_send called (Gemini uses SDK methods): {message[:100]}")
 
-        if not self._on_audio_callback:
-            return
-
-        while len(self._pending_pcmu_bytes) >= self._pcmu_frame_size:
-            frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
-            del self._pending_pcmu_bytes[:self._pcmu_frame_size]
-            self._deliver_pcmu_frame(frame)
-
-        if force_flush and self._pending_pcmu_bytes:
-            pad_len = (-len(self._pending_pcmu_bytes)) % self._pcmu_frame_size
-            if pad_len:
-                self._pending_pcmu_bytes.extend(
-                    bytes([GENESYS_PCMU_SILENCE_BYTE]) * pad_len
-                )
-            while self._pending_pcmu_bytes:
-                frame = bytes(self._pending_pcmu_bytes[:self._pcmu_frame_size])
-                del self._pending_pcmu_bytes[:self._pcmu_frame_size]
-                self._deliver_pcmu_frame(frame)
-
-    def _debug_enabled(self) -> bool:
-        return DEBUG == 'true'
-
-    def _debug_log_payload(self, label: str, payload: Any, max_chars: int = 4000):
-        if not self._debug_enabled():
-            return
-        preview = self._debug_preview(payload, max_chars=max_chars)
-        self.logger.debug(f"{label}: {preview}")
-
-    def _diagnostics_enabled_flag(self) -> bool:
-        return bool(self._diagnostics_enabled)
-
-    def _diagnostic_log(self, label: str, payload: Any, max_chars: int = 1200):
-        if not self._diagnostics_enabled_flag():
-            return
-        preview = self._debug_preview(payload, max_chars=max_chars)
-        self.logger.info(f"[GeminiDiag] {label}: {preview}")
-
-    def _debug_preview(self, payload: Any, max_chars: int = 4000) -> str:
-        try:
-            serializable = self._coerce_to_serializable(payload)
-            if isinstance(serializable, dict):
-                preview = format_json(serializable)
-            elif isinstance(serializable, (list, tuple)):
-                preview = json.dumps(serializable, indent=2, default=str)
-            else:
-                preview = str(serializable)
-        except Exception as exc:
-            preview = f"<unserializable {type(payload).__name__}: {exc}>"
-
-        if len(preview) > max_chars:
-            preview = preview[:max_chars] + "... [truncated]"
-        return preview
-
-    def _coerce_to_serializable(self, payload: Any):
-        if payload is None or isinstance(payload, (str, int, float, bool)):
-            return payload
-        if isinstance(payload, bytes):
-            return f"<bytes len={len(payload)}>"
-        if isinstance(payload, dict):
-            return {k: self._coerce_to_serializable(v) for k, v in payload.items()}
-        if isinstance(payload, (list, tuple)):
-            return [self._coerce_to_serializable(item) for item in payload]
-        if hasattr(payload, "model_dump"):
-            try:
-                return payload.model_dump()
-            except Exception:
-                pass
-        if hasattr(payload, "to_dict"):
-            try:
-                return payload.to_dict()
-            except Exception:
-                pass
-        if hasattr(payload, "__dict__"):
-            try:
-                return {
-                    k: self._coerce_to_serializable(v)
-                    for k, v in payload.__dict__.items()
-                    if not k.startswith("_")
-                }
-            except Exception:
-                pass
-        return str(payload)
-
-    def _build_live_connect_config(
-        self,
-        instructions_text: Optional[str],
-        function_declarations: Optional[List[Dict[str, Any]]]
-    ) -> types.LiveConnectConfig:
-        speech_config = types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice)
-            )
-        )
-
-        if self._manual_activity_detection:
-            automatic_detection = types.AutomaticActivityDetection(disabled=True)
-        else:
-            automatic_detection = types.AutomaticActivityDetection(
-                disabled=False,
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
-                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
-                prefix_padding_ms=AUTOMATIC_VAD_PREFIX_PADDING_MS,
-                silence_duration_ms=AUTOMATIC_VAD_SILENCE_MS
-            )
-
-        realtime_config = types.RealtimeInputConfig(
-            automatic_activity_detection=automatic_detection
-        )
-
-        config_kwargs: Dict[str, Any] = {
-            "response_modalities": [types.Modality.AUDIO],
-            "speech_config": speech_config,
-            "temperature": self.temperature,
-            "input_audio_transcription": types.AudioTranscriptionConfig(),
-            "output_audio_transcription": types.AudioTranscriptionConfig(),
-            "realtime_input_config": realtime_config
-        }
-        if instructions_text:
-            config_kwargs["system_instruction"] = instructions_text
-        if self.max_output_tokens is not None:
-            config_kwargs["max_output_tokens"] = self.max_output_tokens
-
-        typed_declarations = _build_function_declaration_objects(function_declarations or [])
-        if typed_declarations:
-            config_kwargs["tools"] = [types.Tool(function_declarations=typed_declarations)]
-
-        return types.LiveConnectConfig(**config_kwargs)
-
-    def _build_tool_policy(self, has_tools: bool) -> Optional[Dict[str, Any]]:
-        """
-        Translate OpenAI-style tool_choice semantics into a local enforcement policy.
-        """
-        if not has_tools:
-            return None
-
-        mode = types.FunctionCallingConfigMode.AUTO
-        allowed_function_names: Optional[List[str]] = None
-
-        choice = self.custom_tool_choice
-        if isinstance(choice, str):
-            normalized = choice.strip().lower()
-            if normalized in ("none", "disabled"):
-                mode = types.FunctionCallingConfigMode.NONE
-            elif normalized in ("required", "force", "any"):
-                mode = types.FunctionCallingConfigMode.ANY
-            else:
-                mode = types.FunctionCallingConfigMode.AUTO
-        elif isinstance(choice, dict):
-            if choice.get("type") == "function":
-                func_name = (choice.get("function") or {}).get("name")
-                if func_name:
-                    allowed_function_names = [func_name]
-                    mode = types.FunctionCallingConfigMode.VALIDATED
-
-        return {
-            "mode": mode,
-            "allowed_function_names": allowed_function_names
-        }
-
-    def _is_tool_call_permitted(self, function_name: str) -> bool:
-        """
-        Enforce local tool invocation policy derived from tool_choice.
-        """
-        if not self._tool_policy:
-            return True
-
-        mode = self._tool_policy.get("mode")
-        allowed = self._tool_policy.get("allowed_function_names") or []
-
-        if mode == types.FunctionCallingConfigMode.NONE:
+    async def handle_rate_limit(self) -> bool:
+        """Handle rate limiting with backoff."""
+        if self.retry_count >= 3:
+            self.logger.error("[Rate Limit] Max retries exceeded")
             return False
 
-        if mode == types.FunctionCallingConfigMode.VALIDATED and allowed:
-            return function_name in allowed
+        self.retry_count += 1
+        delay = GENESYS_RATE_WINDOW * (2 ** (self.retry_count - 1))
 
+        self.logger.warning(
+            f"[Rate Limit] Retry {self.retry_count}/3, backing off {delay}s"
+        )
+
+        self.running = False
+        await asyncio.sleep(delay)
+        self.running = True
+
+        self.last_retry_time = time.time()
         return True
 
-    async def _handle_genesys_tool_call(self, name: str, call_id: str, args: Dict[str, Any]):
-        """Handle Genesys data action tool calls."""
-        handler = self.genesys_tool_handlers.get(name)
-        if not handler:
-            error_msg = f"No handler registered for tool {name}"
-            self.logger.error(f"[FunctionCall] ERROR: {error_msg}")
-            return
-
-        output_payload: Dict[str, Any]
+    async def terminate_session(self, reason="completed", final_message=None):
+        """Terminate the session with optional final message."""
         try:
-            if not isinstance(args, dict):
-                raise ValueError(f"Tool arguments must be a dictionary, got {type(args).__name__}")
-
-            try:
-                args_preview = json.dumps(args)[:512]
-            except Exception:
-                args_preview = str(args)[:512]
-            self.logger.info(f"[FunctionCall] Calling handler for Genesys tool {name} with args: {args_preview}")
-            if self._debug_enabled():
-                self._debug_log_payload(
-                    f"[FunctionCall] Genesys tool args name={name} id={call_id}",
-                    args or {},
-                    max_chars=2000
+            if final_message and self.session:
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="model",
+                        parts=[types.Part(text=final_message)]
+                    ),
+                    turn_complete=True
                 )
 
-            result_payload = await handler(args)
-
-            if result_payload is None:
-                self.logger.warning(f"[FunctionCall] Tool {name} returned None")
-                result_payload = {}
-
-            output_payload = {
-                "status": "ok",
-                "tool": name,
-                "result": result_payload
-            }
-
-            try:
-                result_preview = json.dumps(result_payload)[:1024]
-            except Exception:
-                result_preview = str(result_payload)[:1024]
-            self.logger.info(f"[FunctionCall] Genesys tool {name} executed successfully. Result preview: {result_preview}")
-
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {str(exc)}"
-            self.logger.error(f"[FunctionCall] ERROR: Tool {name} failed: {exc}", exc_info=True)
-            output_payload = {
-                "status": "error",
-                "tool": name,
-                "error_type": type(exc).__name__,
-                "message": error_msg
-            }
-
-        if self._debug_enabled():
-            self._debug_log_payload(
-                f"[FunctionCall] Genesys tool response payload name={name} id={call_id}",
-                output_payload,
-                max_chars=3000
-            )
-        if self._diagnostics_enabled_flag():
-            self._diagnostic_log(
-                "genesys_tool_result",
-                {
-                    "tool": name,
-                    "call_id": call_id,
-                    "status": output_payload.get("status"),
-                    "error_type": output_payload.get("error_type")
-                }
-            )
-
-        try:
-            # Send function response back to Gemini
-            function_response = types.FunctionResponse(
-                id=call_id,
-                name=name,
-                response=output_payload
-            )
-
-            await self.session.send_tool_response(
-                function_responses=[function_response]
-            )
-
-            self.logger.info(
-                f"[FunctionCall] Sent Genesys tool response for {name} (call_id={call_id})"
-            )
-        except Exception as send_exc:
-            self.logger.error(f"[FunctionCall] CRITICAL ERROR: Failed to send tool result: {send_exc}", exc_info=True)
-
-    async def close(self):
-        """Close the Gemini session."""
-        duration = time.time() - self.start_time
-        self.logger.info(f"Closing Gemini connection after {duration:.2f}s")
-        self.running = False
-        self._buffer_and_emit_pcmu(b"", force_flush=True)
-        self._pending_pcmu_bytes.clear()
-        self._on_audio_callback = None
-        await self._flush_audio_stream_if_needed(force=True)
-
-        # Exit the async context manager if it exists
-        if self._session_context:
-            try:
-                await self._session_context.__aexit__(None, None, None)
-                self.logger.debug("Successfully exited Gemini session context")
-            except Exception as e:
-                self.logger.error(f"Error exiting Gemini session context: {e}")
-            self._session_context = None
-
-        if self.session:
-            self.session = None
-
-        if self.read_task:
-            self.read_task.cancel()
-            try:
-                await self.read_task
-            except asyncio.CancelledError:
-                pass
-            self.read_task = None
-        if self._silence_monitor_task:
-            self._silence_monitor_task.cancel()
-            try:
-                await self._silence_monitor_task
-            except asyncio.CancelledError:
-                pass
-            self._silence_monitor_task = None
+            await self.close()
+        except Exception as e:
+            self.logger.error(f"Error terminating session: {e}", exc_info=True)
 
     async def await_summary(self, timeout: float = 10.0):
-        """Generate a summary of the conversation."""
-        # For Gemini, we can request a summary by sending a specific prompt
-        session = self.session
-        if not session:
-            self.logger.warning("Cannot generate summary: no active Gemini session")
+        """
+        Generate conversation summary.
+
+        Note: Gemini Live API doesn't have the same summary mechanism as OpenAI.
+        We request a summary by sending a specific prompt.
+        """
+        if not self.session:
             return None
 
-        loop = asyncio.get_event_loop()
-        self._summary_future = loop.create_future()
-
         try:
-            # Send summary request
-            await session.send_client_content(
+            # Create future for response
+            loop = asyncio.get_event_loop()
+            self._summary_future = loop.create_future()
+
+            # Request summary
+            await self.session.send_client_content(
                 turns=types.Content(
                     role="user",
-                    parts=[types.Part(text="""
-Please analyze this conversation and provide a structured summary including:
-{
-    "main_topics": [],
-    "key_decisions": [],
-    "action_items": [],
-    "sentiment": ""
-}
-""")]
+                    parts=[types.Part(
+                        text="Provide a brief summary of this conversation in 2-3 sentences."
+                    )]
                 ),
                 turn_complete=True
             )
 
-            return await asyncio.wait_for(self._summary_future, timeout=timeout)
+            # Wait for response
+            result = await asyncio.wait_for(self._summary_future, timeout=timeout)
+            return result
+
         except asyncio.TimeoutError:
-            self.logger.error("Timeout generating summary")
+            self.logger.error("Summary generation timed out")
             return None
-        except Exception as exc:
-            self.logger.error(f"Error requesting Gemini summary: {exc}")
+        except Exception as e:
+            self.logger.error(f"Error generating summary: {e}", exc_info=True)
             return None
         finally:
             self._summary_future = None
@@ -1498,39 +1112,68 @@ Please analyze this conversation and provide a structured summary including:
         """Disconnect the session."""
         await self.close()
 
-    def get_token_metrics(self) -> Dict[str, str]:
-        """
-        Get token usage metrics in a format compatible with output variables.
-        Returns dict with string values for all token counts.
-        """
-        return {
-            "TOTAL_INPUT_TEXT_TOKENS": str(self._token_details.get('input_text_tokens', 0)),
-            "TOTAL_INPUT_CACHED_TEXT_TOKENS": str(self._token_details.get('input_cached_text_tokens', 0)),
-            "TOTAL_INPUT_AUDIO_TOKENS": str(self._token_details.get('input_audio_tokens', 0)),
-            "TOTAL_INPUT_CACHED_AUDIO_TOKENS": str(self._token_details.get('input_cached_audio_tokens', 0)),
-            "TOTAL_OUTPUT_TEXT_TOKENS": str(self._token_details.get('output_text_tokens', 0)),
-            "TOTAL_OUTPUT_AUDIO_TOKENS": str(self._token_details.get('output_audio_tokens', 0))
-        }
-    def _start_silence_monitor(self):
-        if self._silence_monitor_task and not self._silence_monitor_task.done():
+    def _start_vad_monitor(self):
+        """Start VAD monitor task to flush audio stream on idle."""
+        if self._vad_monitor_task and not self._vad_monitor_task.done():
             return
 
         async def _monitor():
             try:
                 while self.running:
-                    await asyncio.sleep(IDLE_WATCH_INTERVAL_SECONDS)
-                    await self._check_idle_timeout()
+                    await asyncio.sleep(VAD_IDLE_CHECK_INTERVAL)
+
+                    # Check if stream is idle
+                    if self._audio_stream_open:
+                        idle_time = time.monotonic() - self._last_audio_time
+                        if idle_time >= 1.0:  # 1 second idle
+                            await self._flush_audio_stream()
             except asyncio.CancelledError:
                 pass
-            except Exception as exc:
-                self.logger.error(f"[Gemini] Silence monitor error: {exc}", exc_info=True)
+            except Exception as e:
+                self.logger.error(f"VAD monitor error: {e}", exc_info=True)
 
-        self._silence_monitor_task = asyncio.create_task(_monitor())
+        self._vad_monitor_task = asyncio.create_task(_monitor())
 
-    async def _check_idle_timeout(self):
-        if not self._audio_stream_open:
-            return
-        if not self._last_audio_frame_time:
-            return
-        if (time.monotonic() - self._last_audio_frame_time) >= MANUAL_VAD_IDLE_TIMEOUT_SECONDS:
-            await self._flush_audio_stream_if_needed(force=True)
+    async def close(self):
+        """Close the Gemini session and cleanup resources."""
+        duration = time.time() - self.start_time
+        self.logger.info(f"Closing Gemini session after {duration:.2f}s")
+
+        self.running = False
+
+        # Flush any remaining audio
+        self._buffer_and_send_pcmu(b"", flush=True)
+        self._pending_pcmu_bytes.clear()
+        self._on_audio_callback = None
+
+        # Flush audio stream
+        await self._flush_audio_stream()
+
+        # Cancel tasks
+        if self._vad_monitor_task:
+            self._vad_monitor_task.cancel()
+            try:
+                await self._vad_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._vad_monitor_task = None
+
+        if self.read_task:
+            self.read_task.cancel()
+            try:
+                await self.read_task
+            except asyncio.CancelledError:
+                pass
+            self.read_task = None
+
+        # Exit session context manager
+        if self._session_context_manager:
+            try:
+                await self._session_context_manager.__aexit__(None, None, None)
+                self.logger.debug("Exited Gemini session context")
+            except Exception as e:
+                self.logger.error(f"Error exiting session context: {e}")
+            self._session_context_manager = None
+
+        self.session = None
+        self.logger.info("Gemini session closed")
