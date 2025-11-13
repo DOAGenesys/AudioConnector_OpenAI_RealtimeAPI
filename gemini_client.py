@@ -132,6 +132,11 @@ class GeminiRealtimeClient:
         self._pending_pcmu_bytes = bytearray()
         self._pcmu_frame_size = GENESYS_PCMU_FRAME_SIZE
 
+        # Transcription accumulation for function calling
+        # Critical: Gemini needs text via send_client_content() to trigger function calls
+        self._accumulated_transcription = ""
+        self._transcription_pending = False
+
         # Token tracking (Gemini format)
         self._total_input_tokens = 0
         self._total_output_tokens = 0
@@ -557,7 +562,13 @@ class GeminiRealtimeClient:
             return False
 
     async def _flush_audio_stream(self):
-        """Flush audio stream when user stops speaking (as per Gemini docs)."""
+        """
+        Flush audio stream when user stops speaking (as per Gemini docs).
+
+        CRITICAL: Also send accumulated transcription for function calling.
+        When VAD detects end of speech, we need to send the transcribed text
+        via send_client_content() so the model can evaluate it for function calls.
+        """
         if not self._audio_stream_open or not self.session:
             return
 
@@ -568,6 +579,11 @@ class GeminiRealtimeClient:
 
             self._audio_stream_open = False
             self._consecutive_silence_frames = 0
+
+            # CRITICAL: Send accumulated transcription for function calling
+            # This is when the user has finished speaking and we have their complete input
+            if self._transcription_pending and self._accumulated_transcription.strip():
+                await self._send_transcription_for_function_calling()
 
         except Exception as e:
             self.logger.error(f"Error flushing audio stream: {e}", exc_info=True)
@@ -581,6 +597,7 @@ class GeminiRealtimeClient:
         - Server content (turn completion, tool calls)
         - Function calls
         - Token usage tracking
+        - Transcription accumulation for function calling
         """
         if not self.running or not self.session:
             self.logger.warning("Cannot start receiving: session not ready")
@@ -588,6 +605,10 @@ class GeminiRealtimeClient:
 
         self._on_audio_callback = on_audio_callback
         self._pending_pcmu_bytes.clear()
+
+        # Clear transcription state
+        self._accumulated_transcription = ""
+        self._transcription_pending = False
 
         async def _read_loop():
             try:
@@ -669,6 +690,51 @@ class GeminiRealtimeClient:
             except Exception as e:
                 self.logger.error(f"Error in audio callback: {e}", exc_info=True)
 
+    async def _send_transcription_for_function_calling(self):
+        """
+        Send accumulated transcription as structured text for function calling.
+
+        CRITICAL: This is THE KEY to making function calls work with Gemini Live API!
+
+        Gemini Live API has two input paths:
+        1. send_realtime_input() - Fast VAD-based audio responses (doesn't reliably trigger functions)
+        2. send_client_content() - Structured content that triggers function calling
+
+        We bridge these by:
+        - Receiving audio via send_realtime_input() for low latency
+        - Accumulating the transcriptions
+        - Sending the transcribed text via send_client_content() when speech ends
+        - This triggers the model to evaluate the text for function calls
+
+        This matches the pattern in Gemini docs where ALL function calling examples
+        use send_client_content() with text, not just audio.
+        """
+        if not self.session or not self._accumulated_transcription.strip():
+            return
+
+        try:
+            text = self._accumulated_transcription.strip()
+            self.logger.info(f"[FunctionCall] Sending transcription for function evaluation: '{text}'")
+
+            # Send as user message via send_client_content()
+            # This is what triggers function calling in Gemini!
+            await self.session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text=text)]
+                ),
+                turn_complete=True
+            )
+
+            # Clear accumulated transcription
+            self._accumulated_transcription = ""
+            self._transcription_pending = False
+
+            self.logger.debug("[FunctionCall] Transcription sent for function evaluation")
+
+        except Exception as e:
+            self.logger.error(f"[FunctionCall] Error sending transcription: {e}", exc_info=True)
+
     async def _process_server_content(self, server_content):
         """
         Process server content from Gemini.
@@ -678,13 +744,23 @@ class GeminiRealtimeClient:
         - Model turns (containing function calls)
         - Interruptions
         - Transcriptions
+
+        CRITICAL FOR FUNCTION CALLING:
+        - Accumulate input transcriptions from audio
+        - Send accumulated text via send_client_content() to trigger function calls
+        - Gemini's send_realtime_input() doesn't reliably trigger function calls
         """
         try:
-            # Log transcriptions
+            # Accumulate input transcriptions for function calling
+            # This is THE KEY to making function calls work with audio input!
             if hasattr(server_content, 'input_transcription'):
                 transcript = server_content.input_transcription
                 if transcript and hasattr(transcript, 'text') and transcript.text:
-                    self.logger.info(f"[Gemini] Input: '{transcript.text}'")
+                    text = transcript.text.strip()
+                    if text:
+                        self.logger.info(f"[Gemini] Input transcription: '{text}'")
+                        self._accumulated_transcription += " " + text
+                        self._transcription_pending = True
 
             if hasattr(server_content, 'output_transcription'):
                 transcript = server_content.output_transcription
@@ -695,6 +771,12 @@ class GeminiRealtimeClient:
             if server_content.turn_complete:
                 self._response_in_progress = False
                 self.logger.info("[FunctionCall] Turn complete from Gemini")
+
+                # CRITICAL: Send accumulated transcription for function calling
+                # When the model finishes a turn, we need to process any pending user input
+                # by sending it as structured text via send_client_content()
+                if self._transcription_pending and self._accumulated_transcription.strip():
+                    await self._send_transcription_for_function_calling()
 
                 # Flush any remaining audio
                 self._buffer_and_send_pcmu(b"", flush=True)
@@ -718,6 +800,13 @@ class GeminiRealtimeClient:
             if hasattr(server_content, 'interrupted') and server_content.interrupted:
                 self.logger.info("[Gemini] Generation interrupted")
                 self._pending_pcmu_bytes.clear()
+
+                # Clear accumulated transcription on interruption
+                # The user is speaking again, so previous transcription is stale
+                if self._accumulated_transcription:
+                    self.logger.debug("[FunctionCall] Cleared accumulated transcription due to interruption")
+                    self._accumulated_transcription = ""
+                    self._transcription_pending = False
 
         except Exception as e:
             self.logger.error(f"Error processing server content: {e}", exc_info=True)
